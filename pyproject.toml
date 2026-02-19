@@ -5,14 +5,30 @@ build-backend = "hatchling.build"
 [project]
 name = "team-table"
 version = "0.1.0"
-description = "Multi-model AI team coordination via MCP"
+description = "Multi-model AI team coordination via MCP — the missing coordination layer for multi-agent, multi-provider AI systems"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
+authors = [{name = "Brickmii"}]
+keywords = ["mcp", "multi-agent", "ai", "coordination", "sqlite", "team", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "mcp>=1.0,<3",
     "pydantic>=2.0,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Brickmii/team-table"
+Repository = "https://github.com/Brickmii/team-table"
+Issues = "https://github.com/Brickmii/team-table/issues"
 
 [project.optional-dependencies]
 dev = [
