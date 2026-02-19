@@ -22,22 +22,22 @@
 - [x] Schema migration support for existing databases (`_migrate_schema`)
 - [x] Broadcast messages accessible to any agent for archive/delete
 
-## Phase 2 — Real-time Notifications (SSE Push)
+## Phase 2 — Real-time Notifications (SSE Push) ✅ COMPLETE
 
 > Priority bumped: async workers (e.g. Codex) need push notifications for new tasks without polling.
 
-- [ ] Define `NotificationBackend` protocol with `notify(agent_name, event)` method
-- [ ] Implement `SSENotificationBackend` with per-agent `asyncio.Queue`
-- [ ] Implement `NoOpNotificationBackend` for STDIO transport (no-op, clients poll)
-- [ ] Module-level `configure_notifications(backend)` pattern for backend selection
-- [ ] SSE endpoint at `GET /events/{agent_name}`
-  - [ ] Verify agent is registered (check members table) before allowing connection
-  - [ ] Send `connected` event immediately on stream open
-  - [ ] 30s heartbeat events to keep connection alive
-  - [ ] Graceful disconnect handling (remove queue from `_connections`)
-- [ ] Wire `notify()` calls into `send_message`, `broadcast`, and `create_task` handlers
-- [ ] Poll daemon remains as fallback for STDIO transport
-- [ ] Network transport startup calls `configure_notifications(SSENotificationBackend())`
+- [x] Define `NotificationBackend` protocol with `notify(agent_name, event)` method
+- [x] Implement `SSENotificationBackend` with per-agent `asyncio.Queue`
+- [x] Implement `NoOpNotificationBackend` for STDIO transport (no-op, clients poll)
+- [x] Module-level `configure_notifications(backend)` pattern for backend selection
+- [x] SSE endpoint at `GET /events/{agent_name}`
+  - [x] Verify agent is registered (check members table) before allowing connection
+  - [x] Send `connected` event immediately on stream open
+  - [x] 30s heartbeat events to keep connection alive
+  - [x] Graceful disconnect handling (remove queue from `_connections`)
+- [x] Wire `notify()` calls into `send_message`, `broadcast`, and `create_task` handlers
+- [x] Poll daemon remains as fallback for STDIO transport
+- [x] Network transport startup calls `configure_notifications(SSENotificationBackend())`
 
 ## Phase 3 — Agent Roles & Audit Log
 
@@ -50,10 +50,10 @@
 - [ ] Enforce permissions at tool level: check role before allowing restricted operations
 - [ ] Predefined role templates: `architect`, `coder`, `reviewer`, `async-worker`
 
-### Audit Log
-- [ ] Append-only `audit_log` table: timestamp, agent_name, action, target_type, target_id, details
-- [ ] Log all state-changing actions: message sent, task claimed/updated, context shared, agent registered
-- [ ] `get_audit_log(agent_name?, action?, since?, limit?)` query tool
+### Audit Log ✅ COMPLETE (done in security hardening pass)
+- [x] Append-only `audit_log` table: timestamp, agent_name, action, target_type, target_id, details
+- [x] Log all state-changing actions: message sent, task claimed/updated, context shared, agent registered
+- [x] `get_audit_log(agent_name?, action?, since?, limit?)` query tool
 - [ ] Human-readable session summary: "what happened while I was away"
 
 ## Phase 4 — Task-Message Integration & Handoff
