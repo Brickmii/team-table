@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS messages (
     recipient TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    read INTEGER NOT NULL DEFAULT 0
+    read INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -90,6 +91,16 @@ class Database:
         conn = self._get_conn()
         conn.executescript(SCHEMA)
         conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Apply incremental schema migrations for existing databases."""
+        conn = self._get_conn()
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN archived_at TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
     def close(self) -> None:
         """Close the thread-local connection if open."""
@@ -156,12 +167,22 @@ class Database:
         conn.commit()
         return cursor.rowcount > 0
 
+    def get_member_role(self, agent_name: str) -> str | None:
+        """Return the role of a registered active agent, or None if not found."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT role FROM members WHERE name=? AND status='active'",
+            (agent_name,),
+        ).fetchone()
+        return row["role"] if row else None
+
     def unread_count(self, agent_name: str) -> int:
         """Return count of unread messages for an agent."""
         conn = self._get_conn()
         row = conn.execute(
             """SELECT COUNT(*) as cnt FROM messages
                WHERE (recipient=? OR recipient='*') AND read=0
+               AND archived_at IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM broadcast_reads br
                    WHERE br.message_id=messages.id AND br.agent_name=?
@@ -176,6 +197,7 @@ class Database:
         rows = conn.execute(
             """SELECT sender, content, created_at FROM messages
                WHERE (recipient=? OR recipient='*') AND read=0
+               AND archived_at IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM broadcast_reads br
                    WHERE br.message_id=messages.id AND br.agent_name=?
@@ -209,17 +231,114 @@ class Database:
     def broadcast(self, sender: str, content: str) -> dict:
         return self.send_message(sender, "*", content)
 
-    def get_messages(self, agent_name: str, include_read: bool = False) -> list[dict]:
+    def delete_message(self, message_id: int, agent_name: str) -> dict | None:
+        """Soft-delete a message (set archived_at). Ownership check enforced."""
         conn = self._get_conn()
+        row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if row is None:
+            return None
+        role = self.get_member_role(agent_name)
+        is_privileged = role in ("admin", "lead")
+        is_broadcast = row["recipient"] == "*"
+        is_owner = row["sender"] == agent_name or row["recipient"] == agent_name
+        if not is_privileged and not is_broadcast and not is_owner:
+            return {
+                "error": f"Agent '{agent_name}' is not authorized to delete message {message_id}"
+            }
+        now = datetime.now(UTC).isoformat()
+        conn.execute("UPDATE messages SET archived_at=? WHERE id=?", (now, message_id))
+        conn.commit()
+        return {
+            "id": row["id"],
+            "sender": row["sender"],
+            "recipient": row["recipient"],
+            "archived_at": now,
+        }
+
+    def archive_message(self, message_id: int, agent_name: str) -> dict | None:
+        """Archive a message: soft-delete + mark as read. Ownership check enforced."""
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+        if row is None:
+            return None
+        role = self.get_member_role(agent_name)
+        is_privileged = role in ("admin", "lead")
+        is_broadcast = row["recipient"] == "*"
+        is_owner = row["sender"] == agent_name or row["recipient"] == agent_name
+        if not is_privileged and not is_broadcast and not is_owner:
+            return {
+                "error": f"Agent '{agent_name}' is not authorized to archive message {message_id}"
+            }
+        now = datetime.now(UTC).isoformat()
+        conn.execute("UPDATE messages SET archived_at=?, read=1 WHERE id=?", (now, message_id))
+        if row["recipient"] == "*":
+            conn.execute(
+                "INSERT OR IGNORE INTO broadcast_reads (agent_name, message_id) VALUES (?, ?)",
+                (agent_name, message_id),
+            )
+        conn.commit()
+        return {
+            "id": row["id"],
+            "sender": row["sender"],
+            "recipient": row["recipient"],
+            "archived_at": now,
+            "read": True,
+        }
+
+    def clear_inbox(
+        self, agent_name: str, before_date: str | None = None, sender: str | None = None
+    ) -> dict:
+        """Bulk archive messages in an agent's inbox with optional filters."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        query = """UPDATE messages SET archived_at=?, read=1
+                   WHERE (recipient=? OR recipient='*') AND archived_at IS NULL"""
+        params: list[str] = [now, agent_name]
+        if before_date:
+            query += " AND created_at < ?"
+            params.append(before_date)
+        if sender:
+            query += " AND sender=?"
+            params.append(sender)
+        cursor = conn.execute(query, params)
+        conn.commit()
+        return {"archived_count": cursor.rowcount, "agent_name": agent_name}
+
+    def purge_messages(self, agent_name: str, before_date: str) -> dict:
+        """Hard-delete messages older than before_date. Admin/lead role required."""
+        role = self.get_member_role(agent_name)
+        if role not in ("admin", "lead"):
+            return {
+                "error": (
+                    f"Agent '{agent_name}' does not have permission to purge"
+                    " messages (requires admin or lead role)"
+                )
+            }
+        conn = self._get_conn()
+        conn.execute(
+            """DELETE FROM broadcast_reads
+               WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?)""",
+            (before_date,),
+        )
+        cursor = conn.execute("DELETE FROM messages WHERE created_at < ?", (before_date,))
+        conn.commit()
+        return {"purged_count": cursor.rowcount, "before_date": before_date}
+
+    def get_messages(
+        self, agent_name: str, include_read: bool = False, include_archived: bool = False
+    ) -> list[dict]:
+        conn = self._get_conn()
+        archive_filter = "" if include_archived else " AND archived_at IS NULL"
         if include_read:
             rows = conn.execute(
-                "SELECT * FROM messages WHERE recipient=? OR recipient='*' ORDER BY created_at",
+                "SELECT * FROM messages WHERE (recipient=? OR recipient='*')"
+                f"{archive_filter} ORDER BY created_at",
                 (agent_name,),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT * FROM messages
-                   WHERE (recipient=? OR recipient='*') AND read=0
+                f"""SELECT * FROM messages
+                   WHERE (recipient=? OR recipient='*') AND read=0{archive_filter}
                    AND NOT EXISTS (
                        SELECT 1 FROM broadcast_reads br
                        WHERE br.message_id=messages.id AND br.agent_name=?
@@ -251,6 +370,7 @@ class Database:
                 "content": r["content"],
                 "created_at": r["created_at"],
                 "read": bool(r["read"]),
+                "archived_at": r["archived_at"],
             }
             for r in rows
         ]
