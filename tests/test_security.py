@@ -7,7 +7,6 @@ import pytest
 from team_table.db import Database
 from team_table.validation import ValidationError
 
-
 # -- Input validation: agent names --
 
 class TestAgentNameValidation:

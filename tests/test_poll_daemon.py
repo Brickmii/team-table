@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+# Import daemon internals
+import sys
 import tempfile
 from pathlib import Path
 
@@ -10,10 +12,8 @@ import pytest
 from team_table.config import Config
 from team_table.db import Database
 
-# Import daemon internals
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from poll_daemon import needs_escalation, auto_reply, run
+from poll_daemon import auto_reply, needs_escalation, run
 
 
 @pytest.fixture
@@ -101,7 +101,10 @@ class TestMessageLimit:
 
         # Check that an escalation message was sent
         msgs = db.get_messages("other-agent")
-        escalation_msgs = [m for m in msgs if "[AUTO]" in m["content"] and "limit" in m["content"].lower()]
+        escalation_msgs = [
+            m for m in msgs
+            if "[AUTO]" in m["content"] and "limit" in m["content"].lower()
+        ]
         assert len(escalation_msgs) >= 1, "Expected an escalation message about the limit"
 
     def test_escalates_on_question(self, db):
@@ -127,5 +130,8 @@ class TestMessageLimit:
         assert stopped.wait(timeout=15), "Daemon did not stop within timeout"
 
         msgs = db.get_messages("asker")
-        escalation_msgs = [m for m in msgs if "[AUTO]" in m["content"] and "decision" in m["content"].lower()]
+        escalation_msgs = [
+            m for m in msgs
+            if "[AUTO]" in m["content"] and "decision" in m["content"].lower()
+        ]
         assert len(escalation_msgs) >= 1, "Expected an escalation message about a decision"

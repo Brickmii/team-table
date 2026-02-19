@@ -34,7 +34,10 @@ def with_notification(db: Database, response: str) -> str:
             "preview": [
                 f"{p['sender']}: {p['content']}" for p in previews
             ],
-            "action": f"You have {count} unread message(s). Call get_messages(agent_name=\"{agent}\") to read and respond to them.",
+            "action": (
+                f"You have {count} unread message(s). "
+                f'Call get_messages(agent_name="{agent}") to read and respond to them.'
+            ),
         }
     }
     # Merge notification into the response

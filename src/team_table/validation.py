@@ -72,7 +72,8 @@ def validate_task_description(description: str) -> None:
     """Validate task description length."""
     if len(description) > MAX_TASK_DESCRIPTION_LENGTH:
         raise ValidationError(
-            f"Task description too long ({len(description)} chars, max {MAX_TASK_DESCRIPTION_LENGTH})"
+            f"Task description too long "
+            f"({len(description)} chars, max {MAX_TASK_DESCRIPTION_LENGTH})"
         )
 
 
@@ -147,5 +148,6 @@ def validate_iso_date(date_str: str) -> None:
         datetime.fromisoformat(date_str)
     except (ValueError, TypeError):
         raise ValidationError(
-            f"Invalid date format: {date_str!r}. Expected ISO 8601 format (e.g. 2025-01-15T00:00:00)"
+            f"Invalid date format: {date_str!r}. "
+            "Expected ISO 8601 format (e.g. 2025-01-15T00:00:00)"
         )

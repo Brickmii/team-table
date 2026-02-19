@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from mcp.server.fastmcp import FastMCP
 from starlette.requests import Request
