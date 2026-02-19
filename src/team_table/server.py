@@ -8,8 +8,8 @@ from team_table.config import Config
 from team_table.db import Database
 from team_table.tools import context, messaging, registration, tasks
 
-mcp = FastMCP("team-table")
 config = Config.from_env()
+mcp = FastMCP("team-table", host=config.host, port=config.port)
 db = Database(config)
 
 registration.register_tools(mcp, db)
@@ -19,7 +19,7 @@ context.register_tools(mcp, db)
 
 
 def main() -> None:
-    mcp.run(transport="stdio")
+    mcp.run(transport=config.transport)
 
 
 if __name__ == "__main__":

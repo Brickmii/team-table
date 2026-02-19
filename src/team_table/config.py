@@ -12,6 +12,9 @@ def _default_db_path() -> Path:
     return Path.home() / ".team-table" / "team_table.db"
 
 
+_VALID_TRANSPORTS = {"stdio", "sse", "streamable-http"}
+
+
 @dataclass
 class Config:
     """Server configuration."""
@@ -19,11 +22,23 @@ class Config:
     db_path: Path = field(default_factory=_default_db_path)
     busy_timeout_ms: int = 5000
     heartbeat_timeout_s: int = 300  # 5 minutes before considered inactive
+    transport: str = "stdio"
+    host: str = "0.0.0.0"
+    port: int = 8741
 
     @classmethod
     def from_env(cls) -> Config:
         """Create config from environment variables."""
         db_path = os.environ.get("TEAM_TABLE_DB")
+        transport = os.environ.get("TEAM_TABLE_TRANSPORT", "stdio").lower()
+        if transport not in _VALID_TRANSPORTS:
+            raise ValueError(
+                f"Invalid TEAM_TABLE_TRANSPORT={transport!r}. "
+                f"Must be one of: {', '.join(sorted(_VALID_TRANSPORTS))}"
+            )
         return cls(
             db_path=Path(db_path) if db_path else _default_db_path(),
+            transport=transport,
+            host=os.environ.get("TEAM_TABLE_HOST", "0.0.0.0"),
+            port=int(os.environ.get("TEAM_TABLE_PORT", "8741")),
         )
