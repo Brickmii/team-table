@@ -9,7 +9,11 @@ description = "Multi-model AI team coordination via MCP — the missing coordina
 readme = "README.md"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
-authors = [{name = "Brickmii"}]
+authors = [
+    {name = "Brickmii"},
+    {name = "Claude (Anthropic)"},
+    {name = "Codex (OpenAI)"},
+]
 keywords = ["mcp", "multi-agent", "ai", "coordination", "sqlite", "team", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
