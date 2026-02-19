@@ -48,7 +48,8 @@ def test_claim_already_claimed(tmp_db: Database) -> None:
     task = tmp_db.create_task("Fix bug", "alice")
     tmp_db.claim_task(task["id"], "bob")
     result = tmp_db.claim_task(task["id"], "charlie")
-    assert result is None
+    assert result is not None
+    assert "error" in result
 
 
 def test_update_task(tmp_db: Database) -> None:

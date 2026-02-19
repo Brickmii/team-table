@@ -5,9 +5,25 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from datetime import UTC, datetime
 
 from team_table.config import Config
+from team_table.validation import (
+    ValidationError,
+    validate_agent_name,
+    validate_capabilities,
+    validate_context_key,
+    validate_context_value,
+    validate_iso_date,
+    validate_message_content,
+    validate_priority,
+    validate_role,
+    validate_task_description,
+    validate_task_result,
+    validate_task_status,
+    validate_task_title,
+)
 
 _local = threading.local()
 
@@ -57,7 +73,24 @@ CREATE TABLE IF NOT EXISTS broadcast_reads (
     PRIMARY KEY (agent_name, message_id),
     FOREIGN KEY (message_id) REFERENCES messages(id)
 );
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target_type TEXT,
+    target_id TEXT,
+    details TEXT NOT NULL DEFAULT '{}'
+);
 """
+
+# -- Rate limiting --
+# In-memory rate limiter: tracks (sender -> list of timestamps)
+_rate_lock = threading.Lock()
+_rate_buckets: dict[str, list[float]] = {}
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX_MESSAGES = 30  # max messages per window
 
 
 class Database:
@@ -102,6 +135,96 @@ class Database:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
+    # -- Audit logging --
+
+    def log_action(
+        self,
+        agent_name: str,
+        action: str,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        details: str | dict | None = None,
+    ) -> None:
+        """Append an entry to the audit log."""
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        if details is None:
+            details_json = "{}"
+        elif isinstance(details, str):
+            details_json = details
+        else:
+            details_json = json.dumps(details)
+        conn.execute(
+            (
+                "INSERT INTO audit_log "
+                "(timestamp, agent_name, action, target_type, target_id, details) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ),
+            (now, agent_name, action, target_type, target_id, details_json),
+        )
+        # Committed by the caller's transaction
+
+    def get_audit_log(
+        self,
+        agent_name: str | None = None,
+        action: str | None = None,
+        since: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Query the audit log with optional filters."""
+        conn = self._get_conn()
+        query = "SELECT * FROM audit_log WHERE 1=1"
+        params: list = []
+        if agent_name:
+            query += " AND agent_name=?"
+            params.append(agent_name)
+        if action:
+            query += " AND action=?"
+            params.append(action)
+        if since:
+            validate_iso_date(since)
+            query += " AND timestamp >= ?"
+            params.append(since)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "timestamp": r["timestamp"],
+                "agent_name": r["agent_name"],
+                "action": r["action"],
+                "target_type": r["target_type"],
+                "target_id": r["target_id"],
+                "details": r["details"],
+            }
+            for r in rows
+        ]
+
+    # -- Rate limiting --
+
+    def _check_rate_limit(self, sender: str) -> None:
+        """Check if sender is within the message rate limit."""
+        now = time.monotonic()
+        with _rate_lock:
+            timestamps = _rate_buckets.get(sender, [])
+            # Prune old entries outside the window
+            cutoff = now - RATE_LIMIT_WINDOW
+            timestamps = [t for t in timestamps if t > cutoff]
+            if len(timestamps) >= RATE_LIMIT_MAX_MESSAGES:
+                raise ValidationError(
+                    f"Rate limit exceeded: max {RATE_LIMIT_MAX_MESSAGES} messages "
+                    f"per {RATE_LIMIT_WINDOW}s. Try again later."
+                )
+            timestamps.append(now)
+            _rate_buckets[sender] = timestamps
+
+    @staticmethod
+    def reset_rate_limits() -> None:
+        """Clear rate limit buckets. Useful for testing."""
+        with _rate_lock:
+            _rate_buckets.clear()
+
     def close(self) -> None:
         """Close the thread-local connection if open."""
         if hasattr(_local, "conn") and _local.conn is not None:
@@ -113,9 +236,13 @@ class Database:
     def register(
         self, name: str, role: str = "agent", capabilities: list[str] | None = None
     ) -> dict:
+        validate_agent_name(name)
+        validate_role(role)
+        caps_list = capabilities or []
+        validate_capabilities(caps_list)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
-        caps = json.dumps(capabilities or [])
+        caps = json.dumps(caps_list)
         conn.execute(
             """INSERT INTO members (name, role, capabilities, status, registered_at, last_heartbeat)
                VALUES (?, ?, ?, 'active', ?, ?)
@@ -126,14 +253,17 @@ class Database:
                    last_heartbeat=excluded.last_heartbeat""",
             (name, role, caps, now, now),
         )
+        self.log_action(name, "register", "member", name, {"role": role})
         conn.commit()
-        return {"name": name, "role": role, "capabilities": capabilities or [], "status": "active"}
+        return {"name": name, "role": role, "capabilities": caps_list, "status": "active"}
 
     def deregister(self, name: str) -> bool:
         conn = self._get_conn()
         cursor = conn.execute(
             "UPDATE members SET status='inactive' WHERE name=?", (name,)
         )
+        if cursor.rowcount > 0:
+            self.log_action(name, "deregister", "member", name)
         conn.commit()
         return cursor.rowcount > 0
 
@@ -213,11 +343,23 @@ class Database:
     # -- Messaging --
 
     def send_message(self, sender: str, recipient: str, content: str) -> dict:
+        validate_agent_name(sender)
+        if recipient != "*":
+            validate_agent_name(recipient)
+        validate_message_content(content)
+        self._check_rate_limit(sender)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         cursor = conn.execute(
             "INSERT INTO messages (sender, recipient, content, created_at) VALUES (?, ?, ?, ?)",
             (sender, recipient, content, now),
+        )
+        self.log_action(
+            sender,
+            "send_message",
+            "message",
+            str(cursor.lastrowid),
+            {"recipient": recipient},
         )
         conn.commit()
         return {
@@ -229,7 +371,24 @@ class Database:
         }
 
     def broadcast(self, sender: str, content: str) -> dict:
-        return self.send_message(sender, "*", content)
+        validate_agent_name(sender)
+        validate_message_content(content)
+        self._check_rate_limit(sender)
+        conn = self._get_conn()
+        now = datetime.now(UTC).isoformat()
+        cursor = conn.execute(
+            "INSERT INTO messages (sender, recipient, content, created_at) VALUES (?, ?, ?, ?)",
+            (sender, "*", content, now),
+        )
+        self.log_action(sender, "broadcast", "message", str(cursor.lastrowid))
+        conn.commit()
+        return {
+            "id": cursor.lastrowid,
+            "sender": sender,
+            "recipient": "*",
+            "content": content,
+            "created_at": now,
+        }
 
     def delete_message(self, message_id: int, agent_name: str) -> dict | None:
         """Soft-delete a message (set archived_at). Ownership check enforced."""
@@ -247,6 +406,7 @@ class Database:
             }
         now = datetime.now(UTC).isoformat()
         conn.execute("UPDATE messages SET archived_at=? WHERE id=?", (now, message_id))
+        self.log_action(agent_name, "delete_message", "message", str(message_id))
         conn.commit()
         return {
             "id": row["id"],
@@ -276,6 +436,7 @@ class Database:
                 "INSERT OR IGNORE INTO broadcast_reads (agent_name, message_id) VALUES (?, ?)",
                 (agent_name, message_id),
             )
+        self.log_action(agent_name, "archive_message", "message", str(message_id))
         conn.commit()
         return {
             "id": row["id"],
@@ -289,6 +450,8 @@ class Database:
         self, agent_name: str, before_date: str | None = None, sender: str | None = None
     ) -> dict:
         """Bulk archive messages in an agent's inbox with optional filters."""
+        if before_date:
+            validate_iso_date(before_date)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         query = """UPDATE messages SET archived_at=?, read=1
@@ -301,11 +464,19 @@ class Database:
             query += " AND sender=?"
             params.append(sender)
         cursor = conn.execute(query, params)
+        self.log_action(
+            agent_name,
+            "clear_inbox",
+            "messages",
+            None,
+            {"archived_count": cursor.rowcount},
+        )
         conn.commit()
         return {"archived_count": cursor.rowcount, "agent_name": agent_name}
 
     def purge_messages(self, agent_name: str, before_date: str) -> dict:
         """Hard-delete messages older than before_date. Admin/lead role required."""
+        validate_iso_date(before_date)
         role = self.get_member_role(agent_name)
         if role not in ("admin", "lead"):
             return {
@@ -321,6 +492,13 @@ class Database:
             (before_date,),
         )
         cursor = conn.execute("DELETE FROM messages WHERE created_at < ?", (before_date,))
+        self.log_action(
+            agent_name,
+            "purge_messages",
+            "messages",
+            None,
+            {"purged_count": cursor.rowcount, "before_date": before_date},
+        )
         conn.commit()
         return {"purged_count": cursor.rowcount, "before_date": before_date}
 
@@ -385,6 +563,12 @@ class Database:
         assignee: str | None = None,
         priority: str = "medium",
     ) -> dict:
+        validate_task_title(title)
+        validate_task_description(description)
+        validate_priority(priority)
+        validate_agent_name(creator)
+        if assignee:
+            validate_agent_name(assignee)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         cursor = conn.execute(
@@ -392,6 +576,13 @@ class Database:
                                   created_at, updated_at)
                VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)""",
             (title, description, priority, creator, assignee, now, now),
+        )
+        self.log_action(
+            creator,
+            "create_task",
+            "task",
+            str(cursor.lastrowid),
+            {"title": title, "priority": priority},
         )
         conn.commit()
         return {
@@ -437,16 +628,30 @@ class Database:
         ]
 
     def claim_task(self, task_id: int, agent_name: str) -> dict | None:
+        validate_agent_name(agent_name)
         conn = self._get_conn()
+        # Check task exists and is claimable
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        if row["status"] != "pending":
+            return {"error": f"Task {task_id} is not in pending status (current: {row['status']})"}
+        # If task has a specific assignee set by creator, only that agent can claim it
+        if row["assignee"] and row["assignee"] != agent_name:
+            role = self.get_member_role(agent_name)
+            if role not in ("admin", "lead"):
+                return {
+                    "error": f"Task {task_id} is assigned to '{row['assignee']}'. "
+                    f"Only the assignee, admin, or lead can claim it."
+                }
         now = datetime.now(UTC).isoformat()
-        cursor = conn.execute(
+        conn.execute(
             """UPDATE tasks SET assignee=?, status='in_progress', updated_at=?
-               WHERE id=? AND status='pending'""",
+               WHERE id=?""",
             (agent_name, now, task_id),
         )
+        self.log_action(agent_name, "claim_task", "task", str(task_id))
         conn.commit()
-        if cursor.rowcount == 0:
-            return None
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return {
             "id": row["id"],
@@ -462,9 +667,27 @@ class Database:
         }
 
     def update_task(
-        self, task_id: int, status: str, result: str | None = None
+        self, task_id: int, status: str, result: str | None = None,
+        agent_name: str | None = None,
     ) -> dict | None:
+        validate_task_status(status)
+        if result is not None:
+            validate_task_result(result)
         conn = self._get_conn()
+        # Authorization: only creator, assignee, admin, or lead can update
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        if agent_name:
+            is_creator = row["creator"] == agent_name
+            is_assignee = row["assignee"] == agent_name
+            role = self.get_member_role(agent_name)
+            is_privileged = role in ("admin", "lead")
+            if not is_creator and not is_assignee and not is_privileged:
+                return {
+                    "error": f"Agent '{agent_name}' is not authorized to update task {task_id}. "
+                    "Only the creator, assignee, admin, or lead can update it."
+                }
         now = datetime.now(UTC).isoformat()
         if result is not None:
             cursor = conn.execute(
@@ -476,6 +699,13 @@ class Database:
                 "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
                 (status, now, task_id),
             )
+        self.log_action(
+            agent_name or "unknown",
+            "update_task",
+            "task",
+            str(task_id),
+            {"status": status},
+        )
         conn.commit()
         if cursor.rowcount == 0:
             return None
@@ -496,6 +726,9 @@ class Database:
     # -- Shared Context --
 
     def share_context(self, key: str, value: str, set_by: str) -> dict:
+        validate_context_key(key)
+        validate_context_value(value)
+        validate_agent_name(set_by)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         conn.execute(
@@ -507,6 +740,7 @@ class Database:
                    updated_at=excluded.updated_at""",
             (key, value, set_by, now),
         )
+        self.log_action(set_by, "share_context", "context", key)
         conn.commit()
         return {"key": key, "value": value, "set_by": set_by, "updated_at": now}
 

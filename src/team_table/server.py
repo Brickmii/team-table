@@ -6,7 +6,7 @@ from mcp.server.fastmcp import FastMCP
 
 from team_table.config import Config
 from team_table.db import Database
-from team_table.tools import context, messaging, registration, tasks
+from team_table.tools import audit, context, messaging, registration, tasks
 
 config = Config.from_env()
 mcp = FastMCP("team-table", host=config.host, port=config.port)
@@ -16,6 +16,7 @@ registration.register_tools(mcp, db)
 messaging.register_tools(mcp, db)
 tasks.register_tools(mcp, db)
 context.register_tools(mcp, db)
+audit.register_tools(mcp, db)
 
 
 def main() -> None:

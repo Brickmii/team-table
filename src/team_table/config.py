@@ -23,7 +23,7 @@ class Config:
     busy_timeout_ms: int = 5000
     heartbeat_timeout_s: int = 300  # 5 minutes before considered inactive
     transport: str = "stdio"
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8741
 
     @classmethod
@@ -36,9 +36,21 @@ class Config:
                 f"Invalid TEAM_TABLE_TRANSPORT={transport!r}. "
                 f"Must be one of: {', '.join(sorted(_VALID_TRANSPORTS))}"
             )
+        host = os.environ.get("TEAM_TABLE_HOST", "127.0.0.1")
+        try:
+            port = int(os.environ.get("TEAM_TABLE_PORT", "8741"))
+        except ValueError:
+            raise ValueError(
+                f"Invalid TEAM_TABLE_PORT={os.environ.get('TEAM_TABLE_PORT')!r}. "
+                "Must be an integer."
+            )
+        if not (1 <= port <= 65535):
+            raise ValueError(
+                f"Invalid TEAM_TABLE_PORT={port}. Must be between 1 and 65535."
+            )
         return cls(
             db_path=Path(db_path) if db_path else _default_db_path(),
             transport=transport,
-            host=os.environ.get("TEAM_TABLE_HOST", "0.0.0.0"),
-            port=int(os.environ.get("TEAM_TABLE_PORT", "8741")),
+            host=host,
+            port=port,
         )

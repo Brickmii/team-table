@@ -8,6 +8,7 @@ from mcp.server.fastmcp import FastMCP
 
 from team_table.db import Database
 from team_table.notify import set_current_agent, with_notification
+from team_table.validation import ValidationError
 
 
 def register_tools(mcp: FastMCP, db: Database) -> None:
@@ -20,7 +21,10 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             return json.dumps({"error": f"Invalid capabilities JSON: {capabilities!r}"})
         if not isinstance(caps, list):
             return json.dumps({"error": "Capabilities must be a JSON array"})
-        result = db.register(name, role, caps)
+        try:
+            result = db.register(name, role, caps)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         set_current_agent(name)
         return with_notification(db, json.dumps(result))
 
