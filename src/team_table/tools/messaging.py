@@ -7,6 +7,13 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from team_table.db import Database
+from team_table.notifications import (
+    EVENT_BROADCAST,
+    EVENT_MESSAGE,
+    make_event,
+    notify,
+    notify_all,
+)
 from team_table.validation import ValidationError
 
 
@@ -16,6 +23,14 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
         """Send a direct message to another agent."""
         try:
             result = db.send_message(sender, recipient, content)
+            notify(
+                recipient,
+                make_event(EVENT_MESSAGE, {
+                    "id": result["id"],
+                    "sender": sender,
+                    "recipient": recipient,
+                }),
+            )
             return json.dumps(result)
         except ValidationError as e:
             return json.dumps({"error": e.message})
@@ -33,6 +48,13 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
         """Send a message to all agents."""
         try:
             result = db.broadcast(sender, content)
+            notify_all(
+                make_event(EVENT_BROADCAST, {
+                    "id": result["id"],
+                    "sender": sender,
+                }),
+                exclude=sender,
+            )
             return json.dumps(result)
         except ValidationError as e:
             return json.dumps({"error": e.message})

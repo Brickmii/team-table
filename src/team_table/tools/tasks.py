@@ -7,6 +7,13 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from team_table.db import Database
+from team_table.notifications import (
+    EVENT_TASK_ASSIGNED,
+    EVENT_TASK_UPDATED,
+    make_event,
+    notify,
+    notify_all,
+)
 from team_table.validation import ValidationError
 
 
@@ -24,6 +31,17 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             result = db.create_task(
                 title, creator, description, assignee or None, priority
             )
+            event = make_event(EVENT_TASK_ASSIGNED, {
+                "id": result["id"],
+                "title": title,
+                "creator": creator,
+                "assignee": result["assignee"],
+                "priority": result["priority"],
+            })
+            if result["assignee"]:
+                notify(result["assignee"], event)
+            else:
+                notify_all(event, exclude=creator)
             return json.dumps(result)
         except ValidationError as e:
             return json.dumps({"error": e.message})
@@ -43,6 +61,15 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
                 return json.dumps(
                     {"error": f"Task {task_id} not found or not in pending status"}
                 )
+            if "error" not in result:
+                notify_all(
+                    make_event(EVENT_TASK_UPDATED, {
+                        "id": task_id,
+                        "status": "in_progress",
+                        "assignee": agent_name,
+                    }),
+                    exclude=agent_name,
+                )
             return json.dumps(result)
         except ValidationError as e:
             return json.dumps({"error": e.message})
@@ -56,6 +83,14 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             )
             if updated is None:
                 return json.dumps({"error": f"Task {task_id} not found"})
+            if "error" not in updated:
+                notify_all(
+                    make_event(EVENT_TASK_UPDATED, {
+                        "id": task_id,
+                        "status": status,
+                    }),
+                    exclude=agent_name or None,
+                )
             return json.dumps(updated)
         except ValidationError as e:
             return json.dumps({"error": e.message})
