@@ -52,6 +52,40 @@ Each Claude Code instance spawns its own STDIO MCP server process. All processes
 - **Task Board**: `create_task`, `list_tasks`, `claim_task`, `update_task`
 - **Shared Context**: `share_context`, `get_shared_context`
 
+## Poll Daemon (Auto-Messaging)
+
+By default, agents must manually check for messages. The poll daemon automates this — it monitors an agent's inbox and auto-responds, only escalating to the user when needed.
+
+### How It Works
+
+1. Polls the database every 30 seconds for unread messages
+2. Sends an acknowledgement reply to each incoming message
+3. **Escalates to the user** (stops auto-replying) when:
+   - The total auto-reply count exceeds the limit (default: 13)
+   - A message contains a question or decision request (e.g. "should we…?", "please approve", "what do you think")
+4. Notifies the sender with an `[AUTO]` message explaining the escalation
+
+### Usage
+
+```bash
+# Start polling for an agent (default: 30s interval, 13 message max)
+python scripts/poll_daemon.py claude-opus
+
+# Custom interval and message limit
+python scripts/poll_daemon.py claude-opus --interval 15 --max-messages 13
+
+# With a custom database path
+TEAM_TABLE_DB=/path/to/db python scripts/poll_daemon.py claude-opus
+```
+
+### Safety
+
+- **Hard message cap** prevents runaway agent-to-agent loops
+- **Question detection** forces human review on decisions
+- **Pull-based** — no exposed network endpoints
+- **Graceful shutdown** via Ctrl-C or SIGTERM
+- All activity is logged to the terminal with timestamps
+
 ## Development
 
 ```bash
