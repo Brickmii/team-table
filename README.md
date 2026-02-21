@@ -57,6 +57,12 @@ From another PC on the LAN, register the remote server:
 claude mcp add --transport sse team-table http://<host-ip>:8741/sse
 ```
 
+From Codex on another PC on the LAN, register the same remote server:
+
+```bash
+codex mcp add --transport sse team-table http://<host-ip>:8741/sse
+```
+
 ### Environment Variables
 
 | Variable | Default | Description |
