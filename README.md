@@ -40,6 +40,7 @@ claude mcp add --transport sse team-table http://<host-ip>:8741/sse
 | `TEAM_TABLE_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` |
 | `TEAM_TABLE_HOST` | `0.0.0.0` | Bind address for network transports |
 | `TEAM_TABLE_PORT` | `8741` | Listen port for network transports |
+| `TEAM_TABLE_REQUIRE_TOKENS` | `true` | Require auth tokens for tool calls and SSE |
 
 ## Architecture
 
@@ -51,6 +52,11 @@ Each Claude Code instance spawns its own STDIO MCP server process. All processes
 - **Messaging**: `send_message`, `get_messages`, `broadcast`
 - **Task Board**: `create_task`, `list_tasks`, `claim_task`, `update_task`
 - **Shared Context**: `share_context`, `get_shared_context`
+
+### Auth Tokens
+
+`register` returns a per-agent token. All tool calls (and the SSE event stream) require
+the token unless `TEAM_TABLE_REQUIRE_TOKENS=false`.
 
 ## Poll Daemon (Auto-Messaging)
 
@@ -92,6 +98,27 @@ TEAM_TABLE_DB=/path/to/db python scripts/poll_daemon.py claude-opus
 pytest          # run tests
 ruff check .    # lint
 ```
+
+### Recommended Workflow (PyCharm + OAuth)
+
+For day-to-day development, use a JetBrains-first flow:
+
+1. Run and debug code/tests in PyCharm.
+2. Use browser-based OAuth sign-in from PyCharm for provider access.
+3. Keep `team-table` auth-token enforcement enabled (`TEAM_TABLE_REQUIRE_TOKENS=true`).
+4. Treat each agent as a distinct identity with its own token and role.
+
+Token guidance for the table process:
+
+- Register each agent once, capture its returned token, and store it in IDE run configs or environment variables.
+- Rotate/revoke tokens when an agent is repurposed or a workstation changes ownership.
+- Never share one token across multiple agents; tokens are agent-scoped.
+
+Future multi-agent expansion:
+
+- Add agents incrementally (coding, review, QA, design, ops) with explicit roles and capabilities.
+- Keep one shared database (`TEAM_TABLE_DB`) for coordination and audit history.
+- Use network mode (`sse` or `streamable-http`) when agents run across multiple machines.
 
 ## License
 
