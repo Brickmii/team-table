@@ -26,6 +26,22 @@ claude mcp add --transport stdio --scope user team-table -- \
   path/to/.venv/bin/python -m team_table.server
 ```
 
+### Register as MCP server in Codex
+
+Windows:
+
+```bash
+codex mcp add --transport stdio --scope user team-table -- \
+  path/to/.venv/Scripts/python.exe -m team_table.server
+```
+
+macOS/Linux:
+
+```bash
+codex mcp add --transport stdio --scope user team-table -- \
+  path/to/.venv/bin/python -m team_table.server
+```
+
 ## Network Mode (LAN)
 
 Run the server over the network so other machines can connect:
