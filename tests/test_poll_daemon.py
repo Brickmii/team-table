@@ -4,7 +4,8 @@ from __future__ import annotations
 
 # Import daemon internals
 import sys
-import tempfile
+import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -18,13 +19,19 @@ from poll_daemon import auto_reply, needs_escalation, run
 
 @pytest.fixture
 def db():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        config = Config(db_path=db_path)
-        database = Database(config)
-        database._test_db_path = str(db_path)  # expose for tests
+    base = Path(".tmp") / "test_poll_daemon"
+    base.mkdir(parents=True, exist_ok=True)
+    tmpdir = base / f"case_{uuid.uuid4().hex}"
+    tmpdir.mkdir()
+    db_path = tmpdir / "test.db"
+    config = Config(db_path=db_path)
+    database = Database(config)
+    database._test_db_path = str(db_path)  # expose for tests
+    try:
         yield database
+    finally:
         database.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ── Escalation detection ─────────────────────────────────────────────────────
