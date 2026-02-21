@@ -12,9 +12,18 @@ pip install -e ".[dev]"
 
 ### Register as MCP server in Claude Code
 
+Windows:
+
 ```bash
 claude mcp add --transport stdio --scope user team-table -- \
   path/to/.venv/Scripts/python.exe -m team_table.server
+```
+
+macOS/Linux:
+
+```bash
+claude mcp add --transport stdio --scope user team-table -- \
+  path/to/.venv/bin/python -m team_table.server
 ```
 
 ## Network Mode (LAN)
