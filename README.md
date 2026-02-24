@@ -7,6 +7,12 @@ An MCP server that lets multiple AI instances discover each other, coordinate ta
 ## Quick Start
 
 ```bash
+pip install team-table
+```
+
+For development:
+
+```bash
 pip install -e ".[dev]"
 ```
 
@@ -77,17 +83,37 @@ codex mcp add --transport sse team-table http://<host-ip>:8741/sse
 
 Each Claude Code instance spawns its own STDIO MCP server process. All processes share one SQLite database (`~/.team-table/team_table.db`) using WAL mode for concurrent access. Alternatively, a single server can be run in network mode (SSE or streamable-http) to serve multiple clients over the LAN.
 
-## Tools (13)
+## Tools (18)
 
 - **Registration**: `register`, `deregister`, `list_members`, `heartbeat`
-- **Messaging**: `send_message`, `get_messages`, `broadcast`
+- **Messaging**: `send_message`, `get_messages`, `broadcast`, `delete_message`, `archive_message`, `clear_inbox`, `purge_messages`
 - **Task Board**: `create_task`, `list_tasks`, `claim_task`, `update_task`
 - **Shared Context**: `share_context`, `get_shared_context`
+- **Audit**: `get_audit_log`
 
 ### Auth Tokens
 
 `register` returns a per-agent token. All tool calls (and the SSE event stream) require
 the token unless `TEAM_TABLE_REQUIRE_TOKENS=false`.
+
+### Message Management
+
+Messages can be archived (soft-delete + mark read), deleted (soft-delete), or purged (hard-delete, admin/lead only). `clear_inbox` supports bulk archival with optional date and sender filters. Archived messages are excluded from inbox queries and unread counts by default.
+
+### SSE Push Notifications
+
+In network mode, agents can subscribe to real-time events at `GET /events/{agent_name}`. The server pushes notifications for new messages, broadcasts, and task assignments. A 30-second heartbeat keeps connections alive. The poll daemon remains available as a fallback for STDIO transport.
+
+### Audit Log
+
+All state-changing actions (registration, messaging, task updates, context sharing) are recorded in an append-only audit log. Query with `get_audit_log` using optional agent, action, and date filters.
+
+### Security
+
+- Input validation on all tool parameters (agent names, messages, task fields)
+- Rate limiting: 30 messages per 60-second window per sender
+- Role-based access control: `admin`, `lead`, `coder`, `reviewer`, `designer`, `tester`, `agent`
+- Privileged operations (purge, delete others' messages) restricted to admin/lead roles
 
 ## Poll Daemon (Auto-Messaging)
 

@@ -52,7 +52,9 @@ def main() -> None:
         assert updated["status"] == "done"
 
         # Shared context
-        agent_a.share_context("repo_url", json.dumps("https://github.com/example/team-table"), "claude-1")
+        agent_a.share_context(
+            "repo_url", json.dumps("https://github.com/example/team-table"), "claude-1",
+        )
         ctx = agent_b.get_shared_context("repo_url")
         print(f"\nShared context: {json.dumps(ctx, indent=2)}")
         assert ctx["set_by"] == "claude-1"

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 # Import daemon internals
-import sys
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
