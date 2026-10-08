@@ -77,9 +77,9 @@
   ```
 
 ### Agent Handoff Protocol
-- [ ] New task status: `awaiting_review` — work done, needs another agent to verify
-- [ ] `reviewer` field on tasks — who should review when work is complete
-- [ ] Auto-notify reviewer when task moves to `awaiting_review`
+- [x] New task status: `awaiting_review` — work done, needs another agent to verify
+- [x] `reviewer` field on tasks — who should review when work is complete (`review_task`)
+- [x] Auto-notify reviewer when task moves to `awaiting_review`
 - [ ] `reassign_task(task_id, new_assignee)` tool for handoff between agents
 
 ## Phase 5 — Workflow Automation & Advanced Context
@@ -93,7 +93,7 @@
   - `share_context(ns="project-alpha", key="api-spec", value=..., ttl=3600)`
   - Agents on the same project share a namespace, old context expires automatically
 - [ ] **Task dependencies** — `blocked_by` / `blocks` fields, auto-unblock when dependencies resolve
-- [ ] **Task subtasks** — parent/child task relationships
+- [x] **Task subtasks** — parent/child task relationships (task trees, `task_tree`, `cancel_task` for a whole tree, budgets per request, a 5 % size cap per member)
 
 ---
 
@@ -111,3 +111,4 @@
 | Roles pulled forward in roadmap | Multi-provider teams need permission boundaries and escalation paths early |
 | Audit log pulled forward in roadmap | Async workers running unattended require full traceability for operators |
 | Agent handoff protocol added | Async worker → reviewer workflow is core to the Codex integration use case |
+| Turn tokens (2026-10-08) | Cin-MinAI uses the table as its turn-token engine: task trees with budgets, a size cap of 5 % of the receiver's context, the person's requests first, Stop for a whole tree, reviewer hand-offs |

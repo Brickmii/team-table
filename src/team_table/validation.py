@@ -15,11 +15,16 @@ MAX_CONTEXT_KEY_LENGTH = 128
 MAX_CONTEXT_VALUE_LENGTH = 50_000
 MAX_CAPABILITIES_COUNT = 20
 MAX_CAPABILITY_LENGTH = 64
+MAX_REFS = 20
+MAX_REF_LENGTH = 300
+MAX_CONTEXT_TOKENS = 10_000_000
 
 # -- Allowed values --
 VALID_PRIORITIES = {"low", "medium", "high"}
-VALID_TASK_STATUSES = {"pending", "in_progress", "done", "blocked"}
-VALID_ROLES = {"agent", "admin", "lead", "coder", "reviewer", "designer", "tester"}
+VALID_TASK_STATUSES = {"pending", "in_progress", "done", "blocked", "awaiting_review", "cancelled"}
+# "person": the human at the table; their requests go first. Granted by the operator, like admin.
+VALID_ROLES = {"agent", "admin", "lead", "coder", "reviewer", "designer", "tester", "person"}
+VALID_ORIGINS = {"agent", "person"}
 
 # Agent names: alphanumeric, hyphens, underscores, spaces, dots
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 _.\-]{0,62}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
@@ -140,6 +145,20 @@ def validate_context_value(value: str) -> None:
         raise ValidationError(
             f"Context value too long ({len(value)} chars, max {MAX_CONTEXT_VALUE_LENGTH})"
         )
+
+
+def validate_refs(refs: list) -> None:
+    """References a task points to instead of carrying bulk: file paths or shared-context keys."""
+    if len(refs) > MAX_REFS:
+        raise ValidationError(f"Too many refs ({len(refs)}, max {MAX_REFS})")
+    for ref in refs:
+        if not isinstance(ref, str) or not ref.strip() or len(ref) > MAX_REF_LENGTH:
+            raise ValidationError(f"Invalid ref: {ref!r}")
+
+
+def validate_context_tokens(tokens: int) -> None:
+    if not isinstance(tokens, int) or tokens < 0 or tokens > MAX_CONTEXT_TOKENS:
+        raise ValidationError(f"Invalid context size: {tokens!r}")
 
 
 def validate_iso_date(date_str: str) -> None:

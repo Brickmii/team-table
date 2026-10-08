@@ -85,11 +85,11 @@ codex mcp add --transport sse team-table http://<host-ip>:8741/sse
 
 Each Claude Code instance spawns its own STDIO MCP server process. All processes share one SQLite database (`~/.team-table/team_table.db`) using WAL mode for concurrent access. Alternatively, a single server can be run in network mode (SSE or streamable-http) to serve multiple clients over the LAN.
 
-## Tools (18)
+## Tools (22)
 
 - **Registration**: `register`, `deregister`, `list_members`, `heartbeat`
 - **Messaging**: `send_message`, `get_messages`, `broadcast`, `delete_message`, `archive_message`, `clear_inbox`, `purge_messages`
-- **Task Board**: `create_task`, `list_tasks`, `claim_task`, `update_task`
+- **Task Board**: `create_task`, `list_tasks`, `claim_task`, `update_task`, `next_task`, `cancel_task`, `review_task`, `task_tree`
 - **Shared Context**: `share_context`, `get_shared_context`
 - **Audit**: `get_audit_log`
 
@@ -98,6 +98,22 @@ Each Claude Code instance spawns its own STDIO MCP server process. All processes
 `register` returns a per-agent token. All tool calls (and the SSE event stream) require
 the token unless `TEAM_TABLE_REQUIRE_TOKENS=false`. Re-registering a name that is already at the
 table needs that name's current token, so nobody can take over an active agent.
+
+### Turn tokens: task trees, budgets and hand-offs
+
+Every request is a task, and the work it needs becomes tasks under it (`parent_id`): a request's
+whole tree is known (`task_tree`), and `cancel_task` stops a task and everything under it.
+
+- **Budgets**: a request may spawn 40 tasks and hand off 4 levels deep (set your own with
+  `budget_tasks` / `budget_depth` on its first task). Past that, `create_task` refuses and says to
+  stop and tell the person where it stands — two agents can't ping-pong for ever.
+- **Size cap**: register with `context_tokens` (your context size) and a task for you is at most
+  5 % of it. Bulk goes in files or shared context, listed in the task's `refs`.
+- **Queues**: `next_task` claims your next task atomically — the person's requests first (origin
+  `person`, only for members the operator gave the `person` role), then by priority, then oldest.
+  A task with unfinished children waits for them.
+- **Hand-offs**: a task with a `reviewer` is done only when the reviewer approves it
+  (`update_task` → `awaiting_review`, then `review_task`); a rejection sends it back with the note.
 
 ### Roles
 

@@ -6,16 +6,20 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from team_table.db import PRIVILEGED_ROLES, Database
+from team_table.db import OPERATOR_ROLES, Database
 from team_table.notify import set_current_agent, with_notification
 from team_table.validation import ValidationError
 
 
 def register_tools(mcp: FastMCP, db: Database) -> None:
     @mcp.tool()
-    def register(name: str, role: str = "agent", capabilities: str = "[]", token: str = "") -> str:
+    def register(
+        name: str, role: str = "agent", capabilities: str = "[]", token: str = "",
+        context_tokens: int = 0,
+    ) -> str:
         """Join the team table. Capabilities is a JSON array of strings. Re-registering a name
-        that is already at the table needs that name's token."""
+        that is already at the table needs that name's token. context_tokens: your context size;
+        tasks for you are capped at 5 % of it (0 = no cap)."""
         try:
             caps = json.loads(capabilities)
         except (json.JSONDecodeError, TypeError):
@@ -32,16 +36,16 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
                 return json.dumps(
                     {"error": f"'{name}' is already at the table; re-registering needs its token"}
                 )
-        # privileged roles come from the operator, never from the caller
-        if role in PRIVILEGED_ROLES and current != role and name not in db.config.admins:
+        # privileged roles (and "person") come from the operator, never from the caller
+        if role in OPERATOR_ROLES and current != role and name not in db.config.admins:
             return json.dumps({
                 "error": f"The {role} role is granted by the operator "
                 "(python -m team_table.admin grant NAME ROLE), not self-assigned"
             })
-        if current in PRIVILEGED_ROLES and role not in PRIVILEGED_ROLES:
+        if current in OPERATOR_ROLES and role not in OPERATOR_ROLES:
             role = current  # re-registering doesn't quietly drop a granted role
         try:
-            result = db.register(name, role, caps)
+            result = db.register(name, role, caps, context_tokens)
             token = db.issue_token(name)
         except ValidationError as e:
             return json.dumps({"error": e.message})

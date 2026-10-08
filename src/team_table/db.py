@@ -17,10 +17,12 @@ from team_table.validation import (
     validate_agent_name,
     validate_capabilities,
     validate_context_key,
+    validate_context_tokens,
     validate_context_value,
     validate_iso_date,
     validate_message_content,
     validate_priority,
+    validate_refs,
     validate_role,
     validate_task_description,
     validate_task_result,
@@ -110,6 +112,24 @@ _rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX_MESSAGES = 30  # max messages per window (tasks and shared context count too)
 PRIVILEGED_ROLES = ("admin", "lead")
+# roles only the operator grants: the privileged ones, and "person" (their requests go first)
+OPERATOR_ROLES = ("admin", "lead", "person")
+
+# -- Turn tokens: task trees, budgets and the size cap --
+DEFAULT_BUDGET_TASKS = 40   # tasks one request may spawn, all levels together
+DEFAULT_BUDGET_DEPTH = 4    # how deep hand-offs may go
+MAX_BUDGET_TASKS = 500
+MAX_BUDGET_DEPTH = 20
+TOKEN_SHARE = 0.05          # a task for a member is at most 5 % of its context
+CHARS_PER_TOKEN = 3         # a conservative estimate for English and code
+FINISHED = ("done", "cancelled")
+TASK_COLUMNS = (
+    ("parent_id", "INTEGER"), ("root_id", "INTEGER"), ("depth", "INTEGER NOT NULL DEFAULT 0"),
+    ("kind", "TEXT NOT NULL DEFAULT ''"), ("refs", "TEXT NOT NULL DEFAULT '[]'"),
+    ("reviewer", "TEXT"), ("origin", "TEXT NOT NULL DEFAULT 'agent'"),
+    ("budget_tasks", "INTEGER"), ("budget_depth", "INTEGER"),
+)
+_PRIORITY_ORDER = "CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END"
 AUDIT_LIMIT_MAX = 200
 
 
@@ -166,11 +186,14 @@ class Database:
     def _migrate_schema(self) -> None:
         """Apply incremental schema migrations for existing databases."""
         conn = self._get_conn()
-        try:
-            conn.execute("ALTER TABLE messages ADD COLUMN archived_at TEXT")
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        columns = [("messages", "archived_at", "TEXT"), ("members", "context_tokens", "INTEGER")]
+        columns += [("tasks", name, kind) for name, kind in TASK_COLUMNS]
+        for table, name, kind in columns:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     # -- Audit logging --
 
@@ -340,28 +363,35 @@ class Database:
     # -- Registration --
 
     def register(
-        self, name: str, role: str = "agent", capabilities: list[str] | None = None
+        self, name: str, role: str = "agent", capabilities: list[str] | None = None,
+        context_tokens: int = 0,
     ) -> dict:
+        """context_tokens: the member's context size (a model's window); tasks for it are capped
+        at 5 % of it. 0 = not given, no cap."""
         validate_agent_name(name)
         validate_role(role)
         caps_list = capabilities or []
         validate_capabilities(caps_list)
+        validate_context_tokens(context_tokens)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         caps = json.dumps(caps_list)
         conn.execute(
-            """INSERT INTO members (name, role, capabilities, status, registered_at, last_heartbeat)
-               VALUES (?, ?, ?, 'active', ?, ?)
+            """INSERT INTO members (name, role, capabilities, status, registered_at,
+                                    last_heartbeat, context_tokens)
+               VALUES (?, ?, ?, 'active', ?, ?, ?)
                ON CONFLICT(name) DO UPDATE SET
                    role=excluded.role,
                    capabilities=excluded.capabilities,
                    status='active',
-                   last_heartbeat=excluded.last_heartbeat""",
-            (name, role, caps, now, now),
+                   last_heartbeat=excluded.last_heartbeat,
+                   context_tokens=excluded.context_tokens""",
+            (name, role, caps, now, now, context_tokens or None),
         )
         self.log_action(name, "register", "member", name, {"role": role})
         conn.commit()
-        return {"name": name, "role": role, "capabilities": caps_list, "status": "active"}
+        return {"name": name, "role": role, "capabilities": caps_list, "status": "active",
+                "context_tokens": context_tokens}
 
     def deregister(self, name: str) -> bool:
         conn = self._get_conn()
@@ -705,41 +735,225 @@ class Database:
         description: str = "",
         assignee: str | None = None,
         priority: str = "medium",
+        *,
+        parent_id: int | None = None,
+        kind: str = "",
+        refs: list[str] | None = None,
+        reviewer: str | None = None,
+        origin: str | None = None,
+        budget_tasks: int | None = None,
+        budget_depth: int | None = None,
     ) -> dict:
+        """A task — a turn token. With parent_id it joins that request's tree (its budgets apply);
+        without, it starts a new request, whose budgets it may set. refs point to the bulk (files,
+        shared-context keys) instead of carrying it: a task for a member is at most 5 % of the
+        member's context. origin "person" (the human's own request, served first) is only for
+        members with the person, admin or lead role."""
         validate_task_title(title)
         validate_task_description(description)
         validate_priority(priority)
         validate_agent_name(creator)
-        if assignee:
-            validate_agent_name(assignee)
+        refs = list(refs or [])
+        validate_refs(refs)
+        if len(kind) > 64:
+            raise ValidationError("Task kind too long (max 64 chars)")
+        for name in (assignee, reviewer):
+            if name:
+                validate_agent_name(name)
+        if reviewer and reviewer == assignee:
+            raise ValidationError("The reviewer must be a different member than the assignee")
         self._check_rate_limit(creator)
         conn = self._get_conn()
+        self._check_size(conn, assignee, title, description)
+        parent = None
+        if parent_id:
+            parent = conn.execute("SELECT * FROM tasks WHERE id=?", (parent_id,)).fetchone()
+            if parent is None:
+                raise ValidationError(f"Parent task {parent_id} not found")
+            if parent["status"] in FINISHED:
+                raise ValidationError(f"Parent task {parent_id} is {parent['status']}")
+        origin = origin or (parent["origin"] if parent is not None else "agent")
+        if origin not in ("agent", "person"):
+            raise ValidationError(f"Invalid origin: {origin!r}")
+        if origin == "person" and (parent is None or parent["origin"] != "person") \
+                and self.get_member_role(creator) not in OPERATOR_ROLES:
+            raise ValidationError("Only the person (or admin/lead) can start a person request")
+        depth, root_id = 0, None
+        if parent is not None:
+            root_id = parent["root_id"] or parent["id"]
+            depth = (parent["depth"] or 0) + 1
+            root = conn.execute("SELECT * FROM tasks WHERE id=?", (root_id,)).fetchone()
+            max_tasks = root["budget_tasks"] or DEFAULT_BUDGET_TASKS
+            max_depth = root["budget_depth"] or DEFAULT_BUDGET_DEPTH
+            spent = conn.execute("SELECT COUNT(*) AS n FROM tasks WHERE root_id=?",
+                                 (root_id,)).fetchone()["n"]
+            if spent >= max_tasks:
+                raise ValidationError(
+                    f"This request's budget is spent ({spent} of {max_tasks} tasks). Stop and "
+                    "tell the person where it stands."
+                )
+            if depth > max_depth:
+                raise ValidationError(
+                    f"Hand-offs this deep aren't allowed (depth {depth}, max {max_depth}). Do "
+                    "it here, or tell the person where it stands."
+                )
+            budget_tasks = budget_depth = None  # budgets belong to the request's first task
+        for value, top in ((budget_tasks, MAX_BUDGET_TASKS), (budget_depth, MAX_BUDGET_DEPTH)):
+            if value is not None and not (1 <= int(value) <= top):
+                raise ValidationError(f"Budget out of range (1-{top}): {value}")
         now = datetime.now(UTC).isoformat()
         cursor = conn.execute(
             """INSERT INTO tasks (title, description, status, priority, creator, assignee,
-                                  created_at, updated_at)
-               VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)""",
-            (title, description, priority, creator, assignee, now, now),
+                                  created_at, updated_at, parent_id, root_id, depth, kind, refs,
+                                  reviewer, origin, budget_tasks, budget_depth)
+               VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (title, description, priority, creator, assignee, now, now, parent_id or None,
+             root_id, depth, kind, json.dumps(refs), reviewer, origin, budget_tasks,
+             budget_depth),
         )
+        task_id = cursor.lastrowid
+        if root_id is None:  # a new request: its own root
+            conn.execute("UPDATE tasks SET root_id=? WHERE id=?", (task_id, task_id))
         self.log_action(
             creator,
             "create_task",
             "task",
-            str(cursor.lastrowid),
-            {"title": title, "priority": priority},
+            str(task_id),
+            {"title": title, "priority": priority, "parent_id": parent_id or None,
+             "origin": origin},
         )
         conn.commit()
+        return self._task(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+
+    def _check_size(self, conn, assignee: str | None, title: str, description: str) -> None:
+        """5 % of the receiving member's context, in characters (~3 a token)."""
+        if not assignee:
+            return
+        row = conn.execute("SELECT context_tokens FROM members WHERE name=?",
+                           (assignee,)).fetchone()
+        tokens = row["context_tokens"] if row is not None else None
+        if not tokens:
+            return
+        cap = int(tokens * TOKEN_SHARE * CHARS_PER_TOKEN)
+        size = len(title) + len(description)
+        if size > cap:
+            raise ValidationError(
+                f"Too big for {assignee}: {size} characters; a task for it is at most {cap} "
+                f"(5 % of its {tokens}-token context). Put the bulk in a file or in shared "
+                "context and list it in refs."
+            )
+
+    @staticmethod
+    def _task(r) -> dict:
+        keys = r.keys()
+        get = lambda k, d=None: r[k] if k in keys else d  # noqa: E731
         return {
-            "id": cursor.lastrowid,
-            "title": title,
-            "description": description,
-            "status": "pending",
-            "priority": priority,
-            "creator": creator,
-            "assignee": assignee,
-            "created_at": now,
-            "updated_at": now,
+            "id": r["id"], "title": r["title"], "description": r["description"],
+            "status": r["status"], "priority": r["priority"], "creator": r["creator"],
+            "assignee": r["assignee"], "result": r["result"], "created_at": r["created_at"],
+            "updated_at": r["updated_at"], "parent_id": get("parent_id"),
+            "root_id": get("root_id"), "depth": get("depth", 0) or 0, "kind": get("kind", ""),
+            "refs": json.loads(get("refs") or "[]"), "reviewer": get("reviewer"),
+            "origin": get("origin", "agent") or "agent",
         }
+
+    def next_task(self, agent_name: str) -> dict | None:
+        """The agent's queue: claim its next task, atomically — the person's requests first,
+        then by priority, then oldest. Tasks assigned to it, or to no one."""
+        validate_agent_name(agent_name)
+        conn = self._get_conn()
+        # a task with unfinished children is being coordinated, not waiting to be done: it waits
+        rows = conn.execute(
+            f"""SELECT id FROM tasks WHERE status='pending' AND (assignee=? OR assignee IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = tasks.id
+                                AND c.status NOT IN ('done', 'cancelled'))
+                ORDER BY (origin='person') DESC, {_PRIORITY_ORDER}, id LIMIT 20""",
+            (agent_name,),
+        ).fetchall()
+        for row in rows:
+            claimed = self.claim_task(row["id"], agent_name)
+            if claimed is not None and "error" not in claimed:
+                return claimed
+        return None
+
+    def cancel_task(self, task_id: int, agent_name: str) -> dict | None:
+        """Stop: the task and every task under it that isn't finished. Its creator, the creator
+        of its request, the person, or admin/lead may."""
+        validate_agent_name(agent_name)
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        root = conn.execute("SELECT creator FROM tasks WHERE id=?",
+                            (row["root_id"] or row["id"],)).fetchone()
+        allowed = agent_name in (row["creator"], root["creator"] if root else None) \
+            or self.get_member_role(agent_name) in OPERATOR_ROLES
+        if not allowed:
+            return {"error": f"Agent '{agent_name}' is not authorized to cancel task {task_id}"}
+        now = datetime.now(UTC).isoformat()
+        # the tree's ids first (sqlite3's rowcount isn't reliable for an UPDATE led by a WITH)
+        ids = [r["id"] for r in conn.execute(
+            """WITH RECURSIVE sub(id) AS (
+                   SELECT ? UNION ALL SELECT t.id FROM tasks t JOIN sub ON t.parent_id = sub.id)
+               SELECT id FROM sub""",
+            (task_id,),
+        ).fetchall()]
+        marks = ",".join("?" * len(ids))
+        cursor = conn.execute(
+            f"""UPDATE tasks SET status='cancelled', updated_at=?
+                WHERE id IN ({marks}) AND status NOT IN ('done', 'cancelled')""",
+            (now, *ids),
+        )
+        self.log_action(agent_name, "cancel_task", "task", str(task_id),
+                        {"cancelled": cursor.rowcount})
+        conn.commit()
+        return {"id": task_id, "cancelled": cursor.rowcount}
+
+    def review_task(self, task_id: int, agent_name: str, approve: bool,
+                    note: str = "") -> dict | None:
+        """The reviewer's answer to a task awaiting review: approved → done; not → back to its
+        assignee (in progress), the note added to its result."""
+        validate_agent_name(agent_name)
+        if note:
+            validate_task_result(note)
+        conn = self._get_conn()
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        if row["status"] != "awaiting_review":
+            return {"error": f"Task {task_id} isn't awaiting review (it's {row['status']})"}
+        if agent_name != row["reviewer"] and self.get_member_role(agent_name) \
+                not in PRIVILEGED_ROLES:
+            return {"error": f"Task {task_id} is for '{row['reviewer']}' to review"}
+        result = row["result"] or ""
+        if note:
+            result = (result + f"\n[review by {agent_name}] {note}").strip()[-5000:]
+        status = "done" if approve else "in_progress"
+        now = datetime.now(UTC).isoformat()
+        conn.execute("UPDATE tasks SET status=?, result=?, updated_at=? WHERE id=?",
+                     (status, result, now, task_id))
+        self.log_action(agent_name, "review_task", "task", str(task_id), {"approved": approve})
+        conn.commit()
+        return self._task(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
+
+    def task_tree(self, task_id: int) -> dict | None:
+        """A request's whole tree, from its first task: each task with its children."""
+        conn = self._get_conn()
+        row = conn.execute("SELECT root_id, id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        root_id = row["root_id"] or row["id"]
+        rows = conn.execute("SELECT * FROM tasks WHERE root_id=? OR id=? ORDER BY id",
+                            (root_id, root_id)).fetchall()
+        nodes = {r["id"]: {**self._task(r), "children": []} for r in rows}
+        top = None
+        for node in nodes.values():
+            parent = nodes.get(node["parent_id"]) if node["parent_id"] else None
+            if parent is not None:
+                parent["children"].append(node)
+            elif node["id"] == root_id:
+                top = node
+        return top
 
     def list_tasks(
         self, status: str | None = None, assignee: str | None = None
@@ -755,21 +969,7 @@ class Database:
             params.append(assignee)
         query += " ORDER BY created_at"
         rows = conn.execute(query, params).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "title": r["title"],
-                "description": r["description"],
-                "status": r["status"],
-                "priority": r["priority"],
-                "creator": r["creator"],
-                "assignee": r["assignee"],
-                "result": r["result"],
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            }
-            for r in rows
-        ]
+        return [self._task(r) for r in rows]
 
     def claim_task(self, task_id: int, agent_name: str) -> dict | None:
         validate_agent_name(agent_name)
@@ -789,26 +989,19 @@ class Database:
                     f"Only the assignee, admin, or lead can claim it."
                 }
         now = datetime.now(UTC).isoformat()
-        conn.execute(
+        # atomic: two agents claiming at once can't both get it
+        cursor = conn.execute(
             """UPDATE tasks SET assignee=?, status='in_progress', updated_at=?
-               WHERE id=?""",
+               WHERE id=? AND status='pending'""",
             (agent_name, now, task_id),
         )
+        if cursor.rowcount == 0:
+            conn.commit()
+            return {"error": f"Task {task_id} was just claimed by someone else"}
         self.log_action(agent_name, "claim_task", "task", str(task_id))
         conn.commit()
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "description": row["description"],
-            "status": row["status"],
-            "priority": row["priority"],
-            "creator": row["creator"],
-            "assignee": row["assignee"],
-            "result": row["result"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+        return self._task(row)
 
     def update_task(
         self, task_id: int, status: str, result: str | None = None,
@@ -832,6 +1025,17 @@ class Database:
                     "error": f"Agent '{agent_name}' is not authorized to update task {task_id}. "
                     "Only the creator, assignee, admin, or lead can update it."
                 }
+        if status == "cancelled":
+            return {"error": "Use cancel_task: it stops the task and everything under it"}
+        if row["status"] == "cancelled":
+            return {"error": f"Task {task_id} was cancelled"}
+        if status == "awaiting_review" and not row["reviewer"]:
+            return {"error": f"Task {task_id} has no reviewer"}
+        if status == "done" and row["reviewer"] and agent_name != row["reviewer"]:
+            return {
+                "error": f"Task {task_id} is done when '{row['reviewer']}' approves it: set "
+                "awaiting_review"
+            }
         now = datetime.now(UTC).isoformat()
         if result is not None:
             cursor = conn.execute(
@@ -854,18 +1058,7 @@ class Database:
         if cursor.rowcount == 0:
             return None
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        return {
-            "id": row["id"],
-            "title": row["title"],
-            "description": row["description"],
-            "status": row["status"],
-            "priority": row["priority"],
-            "creator": row["creator"],
-            "assignee": row["assignee"],
-            "result": row["result"],
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+        return self._task(row)
 
     # -- Shared Context --
 
