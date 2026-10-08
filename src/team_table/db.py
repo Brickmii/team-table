@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import secrets
 import sqlite3
 import threading
 import time
-import secrets
-import hashlib
 from datetime import UTC, datetime
 
 from team_table.config import Config
@@ -76,6 +77,12 @@ CREATE TABLE IF NOT EXISTS broadcast_reads (
     FOREIGN KEY (message_id) REFERENCES messages(id)
 );
 
+CREATE TABLE IF NOT EXISTS broadcast_hidden (
+    agent_name TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (agent_name, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -101,7 +108,9 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 _rate_lock = threading.Lock()
 _rate_buckets: dict[str, list[float]] = {}
 RATE_LIMIT_WINDOW = 60  # seconds
-RATE_LIMIT_MAX_MESSAGES = 30  # max messages per window
+RATE_LIMIT_MAX_MESSAGES = 30  # max messages per window (tasks and shared context count too)
+PRIVILEGED_ROLES = ("admin", "lead")
+AUDIT_LIMIT_MAX = 200
 
 
 class Database:
@@ -114,6 +123,22 @@ class Database:
 
     def _ensure_dir(self) -> None:
         self.config.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._private(self.config.db_path.parent, 0o700)
+
+    @staticmethod
+    def _private(path, mode: int) -> None:
+        """The table holds every message, task and token hash: owner-only (POSIX)."""
+        if os.name == "posix":
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass
+
+    def _private_files(self) -> None:
+        for suffix in ("", "-wal", "-shm"):
+            p = str(self.config.db_path) + suffix
+            if os.path.exists(p):
+                self._private(p, 0o600)
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get a thread-local connection."""
@@ -136,6 +161,7 @@ class Database:
         conn.executescript(SCHEMA)
         conn.commit()
         self._migrate_schema()
+        self._private_files()
 
     def _migrate_schema(self) -> None:
         """Apply incremental schema migrations for existing databases."""
@@ -266,7 +292,7 @@ class Database:
             query += " AND timestamp >= ?"
             params.append(since)
         query += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+        params.append(max(1, min(int(limit), AUDIT_LIMIT_MAX)))
         rows = conn.execute(query, params).fetchall()
         return [
             {
@@ -378,6 +404,11 @@ class Database:
         conn.commit()
         return cursor.rowcount > 0
 
+    def member_exists(self, name: str) -> bool:
+        """Registered, active or not."""
+        row = self._get_conn().execute("SELECT 1 FROM members WHERE name=?", (name,)).fetchone()
+        return row is not None
+
     def get_member_role(self, agent_name: str) -> str | None:
         """Return the role of a registered active agent, or None if not found."""
         conn = self._get_conn()
@@ -478,7 +509,7 @@ class Database:
         if row is None:
             return None
         role = self.get_member_role(agent_name)
-        is_privileged = role in ("admin", "lead")
+        is_privileged = role in PRIVILEGED_ROLES
         is_broadcast = row["recipient"] == "*"
         is_owner = row["sender"] == agent_name or row["recipient"] == agent_name
         if not is_privileged and not is_broadcast and not is_owner:
@@ -486,6 +517,14 @@ class Database:
                 "error": f"Agent '{agent_name}' is not authorized to delete message {message_id}"
             }
         now = datetime.now(UTC).isoformat()
+        if is_broadcast and not is_privileged and row["sender"] != agent_name:
+            self._hide_broadcast(conn, agent_name, message_id)  # gone from this agent's inbox only
+            self.log_action(
+                agent_name, "delete_message", "message", str(message_id), {"scope": "own inbox"}
+            )
+            conn.commit()
+            return {"id": row["id"], "sender": row["sender"], "recipient": "*", "archived_at": now,
+                    "hidden_for": agent_name}
         conn.execute("UPDATE messages SET archived_at=? WHERE id=?", (now, message_id))
         self.log_action(agent_name, "delete_message", "message", str(message_id))
         conn.commit()
@@ -503,7 +542,7 @@ class Database:
         if row is None:
             return None
         role = self.get_member_role(agent_name)
-        is_privileged = role in ("admin", "lead")
+        is_privileged = role in PRIVILEGED_ROLES
         is_broadcast = row["recipient"] == "*"
         is_owner = row["sender"] == agent_name or row["recipient"] == agent_name
         if not is_privileged and not is_broadcast and not is_owner:
@@ -511,6 +550,15 @@ class Database:
                 "error": f"Agent '{agent_name}' is not authorized to archive message {message_id}"
             }
         now = datetime.now(UTC).isoformat()
+        if is_broadcast and not is_privileged and row["sender"] != agent_name:
+            # one agent archiving a broadcast used to archive it for everyone
+            self._hide_broadcast(conn, agent_name, message_id)
+            self.log_action(
+                agent_name, "archive_message", "message", str(message_id), {"scope": "own inbox"}
+            )
+            conn.commit()
+            return {"id": row["id"], "sender": row["sender"], "recipient": "*", "archived_at": now,
+                    "read": True, "hidden_for": agent_name}
         conn.execute("UPDATE messages SET archived_at=?, read=1 WHERE id=?", (now, message_id))
         if row["recipient"] == "*":
             conn.execute(
@@ -526,6 +574,15 @@ class Database:
             "archived_at": now,
             "read": True,
         }
+
+    @staticmethod
+    def _hide_broadcast(conn, agent_name: str, message_id: int) -> None:
+        conn.execute(
+            "INSERT OR IGNORE INTO broadcast_hidden (agent_name, message_id) VALUES (?, ?)",
+            (agent_name, message_id),
+        )
+        conn.execute("INSERT OR IGNORE INTO broadcast_reads (agent_name, message_id) VALUES (?, ?)",
+                     (agent_name, message_id))
 
     def clear_inbox(
         self, agent_name: str, before_date: str | None = None, sender: str | None = None
@@ -567,11 +624,12 @@ class Database:
                 )
             }
         conn = self._get_conn()
-        conn.execute(
-            """DELETE FROM broadcast_reads
-               WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?)""",
-            (before_date,),
-        )
+        for table in ("broadcast_reads", "broadcast_hidden"):
+            conn.execute(
+                f"""DELETE FROM {table}
+                   WHERE message_id IN (SELECT id FROM messages WHERE created_at < ?)""",
+                (before_date,),
+            )
         cursor = conn.execute("DELETE FROM messages WHERE created_at < ?", (before_date,))
         self.log_action(
             agent_name,
@@ -587,12 +645,16 @@ class Database:
         self, agent_name: str, include_read: bool = False, include_archived: bool = False
     ) -> list[dict]:
         conn = self._get_conn()
-        archive_filter = "" if include_archived else " AND archived_at IS NULL"
+        archive_filter = "" if include_archived else (
+            " AND archived_at IS NULL AND NOT EXISTS (SELECT 1 FROM broadcast_hidden bh"
+            " WHERE bh.message_id=messages.id AND bh.agent_name=?)"
+        )
+        hidden = () if include_archived else (agent_name,)
         if include_read:
             rows = conn.execute(
                 "SELECT * FROM messages WHERE (recipient=? OR recipient='*')"
                 f"{archive_filter} ORDER BY created_at",
-                (agent_name,),
+                (agent_name, *hidden),
             ).fetchall()
         else:
             rows = conn.execute(
@@ -603,7 +665,7 @@ class Database:
                        WHERE br.message_id=messages.id AND br.agent_name=?
                    )
                    ORDER BY created_at""",
-                (agent_name, agent_name),
+                (agent_name, *hidden, agent_name),
             ).fetchall()
         # Mark direct messages as read
         msg_ids = [r["id"] for r in rows if r["recipient"] != "*"]
@@ -650,6 +712,7 @@ class Database:
         validate_agent_name(creator)
         if assignee:
             validate_agent_name(assignee)
+        self._check_rate_limit(creator)
         conn = self._get_conn()
         now = datetime.now(UTC).isoformat()
         cursor = conn.execute(
@@ -763,7 +826,7 @@ class Database:
             is_creator = row["creator"] == agent_name
             is_assignee = row["assignee"] == agent_name
             role = self.get_member_role(agent_name)
-            is_privileged = role in ("admin", "lead")
+            is_privileged = role in PRIVILEGED_ROLES
             if not is_creator and not is_assignee and not is_privileged:
                 return {
                     "error": f"Agent '{agent_name}' is not authorized to update task {task_id}. "
@@ -811,6 +874,16 @@ class Database:
         validate_context_value(value)
         validate_agent_name(set_by)
         conn = self._get_conn()
+        # "owner/…" keys belong to that member: only they (or admin/lead) may change them. Other
+        # keys stay a shared board anyone can update; every overwrite records who held it before.
+        owner = key.split("/", 1)[0] if "/" in key else ""
+        if owner and owner != set_by and self.member_exists(owner) \
+                and self.get_member_role(set_by) not in PRIVILEGED_ROLES:
+            raise ValidationError(
+                f"Context key {key!r} belongs to '{owner}'; only they (or admin/lead) can change it"
+            )
+        self._check_rate_limit(set_by)
+        before = conn.execute("SELECT set_by FROM shared_context WHERE key=?", (key,)).fetchone()
         now = datetime.now(UTC).isoformat()
         conn.execute(
             """INSERT INTO shared_context (key, value, set_by, updated_at)
@@ -821,7 +894,8 @@ class Database:
                    updated_at=excluded.updated_at""",
             (key, value, set_by, now),
         )
-        self.log_action(set_by, "share_context", "context", key)
+        self.log_action(set_by, "share_context", "context", key,
+                        {"previous_set_by": before["set_by"]} if before else None)
         conn.commit()
         return {"key": key, "value": value, "set_by": set_by, "updated_at": now}
 

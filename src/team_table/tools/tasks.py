@@ -87,10 +87,12 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
     ) -> str:
         """Update a task's status and optionally set a result."""
         try:
+            if not agent_name:
+                raise ValidationError("agent_name is required")
             db.require_token(agent_name, token)
-            updated = db.update_task(
-                task_id, status, result or None, agent_name=agent_name or None
-            )
+            # always the caller's name: with tokens off, an empty name used to skip the
+            # permission check
+            updated = db.update_task(task_id, status, result or None, agent_name=agent_name)
             if updated is None:
                 return json.dumps({"error": f"Task {task_id} not found"})
             if "error" not in updated:

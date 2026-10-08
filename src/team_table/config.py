@@ -32,6 +32,13 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8741
     require_tokens: bool = True
+    # names that may register with a privileged role (admin, lead) through the tool; anyone else
+    # gets them only from the operator (python -m team_table.admin grant NAME ROLE), who has the
+    # database file itself
+    admins: frozenset[str] = frozenset()
+    # a network transport without tokens lets anyone on the network act as anyone: refused
+    # unless this is set
+    allow_insecure: bool = False
 
     @classmethod
     def from_env(cls) -> Config:
@@ -58,10 +65,15 @@ class Config:
         require_tokens = _parse_bool(
             os.environ.get("TEAM_TABLE_REQUIRE_TOKENS"), default=True
         )
+        admins = frozenset(
+            n.strip() for n in os.environ.get("TEAM_TABLE_ADMINS", "").split(",") if n.strip()
+        )
         return cls(
             db_path=Path(db_path) if db_path else _default_db_path(),
             transport=transport,
             host=host,
             port=port,
             require_tokens=require_tokens,
+            admins=admins,
+            allow_insecure=_parse_bool(os.environ.get("TEAM_TABLE_ALLOW_INSECURE"), default=False),
         )

@@ -45,22 +45,20 @@ async def stream_agent_events(request: Request):  # type: ignore[no-untyped-def]
     if not agent_name:
         return JSONResponse({"error": "agent_name required"}, status_code=400)
 
-    # Verify agent is registered
+    # Verify agent is registered and holds a token, with one answer for both, so a stranger
+    # can't learn which names exist
+    denied = JSONResponse({"error": "Not allowed"}, status_code=403)
     role = db.get_member_role(agent_name)
     if role is None:
-        return JSONResponse(
-            {"error": f"Agent '{agent_name}' is not registered or inactive"},
-            status_code=403,
-        )
+        return denied
 
-    # Require token if configured
     if config.require_tokens:
         token = request.query_params.get("token", "")
         auth_header = request.headers.get("Authorization", "")
         if auth_header.lower().startswith("bearer "):
             token = auth_header.split(" ", 1)[1].strip()
         if not db.validate_token(agent_name, token):
-            return JSONResponse({"error": "Invalid or missing auth token"}, status_code=403)
+            return denied
 
     backend = get_backend()
     if not isinstance(backend, SSENotificationBackend):
@@ -96,6 +94,12 @@ async def stream_agent_events(request: Request):  # type: ignore[no-untyped-def]
 
 
 def main() -> None:
+    if config.transport != "stdio" and not config.require_tokens and not config.allow_insecure:
+        raise SystemExit(
+            "Refusing to serve the table on the network without auth tokens: anyone who can "
+            "reach it could act as any agent. Keep TEAM_TABLE_REQUIRE_TOKENS on, or set "
+            "TEAM_TABLE_ALLOW_INSECURE=true to accept that."
+        )
     # Configure notification backend based on transport
     if config.transport in ("sse", "streamable-http"):
         configure_notifications(SSENotificationBackend())

@@ -19,9 +19,13 @@ def get_current_agent() -> str | None:
     return _current_agent
 
 
-def with_notification(db: Database, response: str) -> str:
-    """Append unread message badge to a tool response if agent is registered."""
-    agent = get_current_agent()
+def with_notification(db: Database, response: str, agent: str | None = None) -> str:
+    """Append the caller's unread-message badge to a tool response.
+
+    The agent is the authenticated caller, passed in. A process-wide "current agent" (still kept
+    for the STDIO transport's own bookkeeping) is never used here: with several clients on one
+    network server it pointed at whoever called last, and one agent's response carried another
+    agent's unread previews."""
     if not agent:
         return response
     count = db.unread_count(agent)

@@ -75,9 +75,11 @@ codex mcp add --transport sse team-table http://<host-ip>:8741/sse
 |---|---|---|
 | `TEAM_TABLE_DB` | `~/.team-table/team_table.db` | Path to the SQLite database |
 | `TEAM_TABLE_TRANSPORT` | `stdio` | Transport mode: `stdio`, `sse`, or `streamable-http` |
-| `TEAM_TABLE_HOST` | `0.0.0.0` | Bind address for network transports |
+| `TEAM_TABLE_HOST` | `127.0.0.1` | Bind address for network transports (`0.0.0.0` to serve the LAN) |
 | `TEAM_TABLE_PORT` | `8741` | Listen port for network transports |
 | `TEAM_TABLE_REQUIRE_TOKENS` | `true` | Require auth tokens for tool calls and SSE |
+| `TEAM_TABLE_ADMINS` | (none) | Comma-separated names allowed to register as `admin` or `lead` |
+| `TEAM_TABLE_ALLOW_INSECURE` | `false` | Allow a network transport with tokens off (anyone on the network could act as anyone) |
 
 ## Architecture
 
@@ -94,7 +96,39 @@ Each Claude Code instance spawns its own STDIO MCP server process. All processes
 ### Auth Tokens
 
 `register` returns a per-agent token. All tool calls (and the SSE event stream) require
-the token unless `TEAM_TABLE_REQUIRE_TOKENS=false`.
+the token unless `TEAM_TABLE_REQUIRE_TOKENS=false`. Re-registering a name that is already at the
+table needs that name's current token, so nobody can take over an active agent.
+
+### Roles
+
+`admin` and `lead` can't be self-assigned through `register`. The operator — whoever has the
+database file — grants them:
+
+```bash
+python -m team_table.admin list
+python -m team_table.admin grant claude-opus lead
+python -m team_table.admin revoke-tokens some-agent
+```
+
+Names listed in `TEAM_TABLE_ADMINS` may register directly with a privileged role.
+
+### Network security
+
+Network mode speaks plain HTTP: tokens and messages cross the network unencrypted. Use it on a
+trusted LAN, or put it behind TLS (a reverse proxy, or an SSH tunnel). With tokens off, a network
+transport refuses to start unless `TEAM_TABLE_ALLOW_INSECURE=true`. The database is created
+readable by its owner only.
+
+### Shared context keys
+
+Keys are a shared board anyone at the table can update, and every overwrite records who held the
+key before. A key named `owner/...` (for example `alice/plan`) belongs to that member: only they,
+or an admin/lead, can change it.
+
+### Broadcasts
+
+Archiving or deleting a broadcast hides it from your own inbox. Only its sender, or an admin/lead,
+removes it for everyone.
 
 ### Message Management
 

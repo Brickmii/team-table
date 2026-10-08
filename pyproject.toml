@@ -26,7 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "mcp>=1.0,<3",
+    "mcp>=1.28.1,<2",  # 1.28.1+: the six published SDK advisories fixed; 2.x renamed FastMCP (the code is 1.x)
     "pydantic>=2.0,<3",
     "sse-starlette>=1.0",
 ]
