@@ -23,29 +23,42 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             return json.dumps({"error": "Capabilities must be a JSON array"})
         try:
             result = db.register(name, role, caps)
+            token = db.issue_token(name)
         except ValidationError as e:
             return json.dumps({"error": e.message})
         set_current_agent(name)
-        return with_notification(db, json.dumps(result))
+        return with_notification(db, json.dumps({**result, "token": token}))
 
     @mcp.tool()
-    def deregister(name: str) -> str:
+    def deregister(name: str, token: str) -> str:
         """Leave the team table."""
+        try:
+            db.require_token(name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         success = db.deregister(name)
         if success:
             return json.dumps({"status": "deregistered", "name": name})
         return json.dumps({"error": f"Member '{name}' not found"})
 
     @mcp.tool()
-    def list_members(include_inactive: bool = False) -> str:
+    def list_members(agent_name: str, token: str, include_inactive: bool = False) -> str:
         """See who's at the team table."""
+        try:
+            db.require_token(agent_name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         members = db.list_members(include_inactive)
         return with_notification(db, json.dumps(members))
 
     @mcp.tool()
-    def heartbeat(name: str) -> str:
+    def heartbeat(name: str, token: str) -> str:
         """Update last-seen timestamp for an agent."""
         set_current_agent(name)
+        try:
+            db.require_token(name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         success = db.heartbeat(name)
         if success:
             return with_notification(db, json.dumps({"status": "ok", "name": name}))

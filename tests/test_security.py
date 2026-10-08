@@ -348,3 +348,23 @@ class TestCapabilitiesValidation:
     def test_non_string_capability(self, tmp_db: Database) -> None:
         with pytest.raises(ValidationError, match="must be a string"):
             tmp_db.register("alice", capabilities=[123])  # type: ignore[list-item]
+
+
+# -- Auth tokens --
+
+class TestAuthTokens:
+    def test_issue_and_validate_token(self, tmp_db: Database) -> None:
+        tmp_db.register("alice")
+        token = tmp_db.issue_token("alice")
+        assert tmp_db.validate_token("alice", token) is True
+
+    def test_revoke_token(self, tmp_db: Database) -> None:
+        tmp_db.register("alice")
+        token = tmp_db.issue_token("alice")
+        tmp_db.revoke_tokens("alice")
+        assert tmp_db.validate_token("alice", token) is False
+
+    def test_require_token_enforced(self, tmp_db: Database) -> None:
+        tmp_db.register("alice")
+        with pytest.raises(ValidationError, match="auth token"):
+            tmp_db.require_token("alice", "bad-token")

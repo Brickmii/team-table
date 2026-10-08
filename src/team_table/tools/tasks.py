@@ -22,12 +22,14 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
     def create_task(
         title: str,
         creator: str,
+        token: str,
         description: str = "",
         assignee: str = "",
         priority: str = "medium",
     ) -> str:
         """Post a task to the task board."""
         try:
+            db.require_token(creator, token)
             result = db.create_task(
                 title, creator, description, assignee or None, priority
             )
@@ -47,15 +49,20 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             return json.dumps({"error": e.message})
 
     @mcp.tool()
-    def list_tasks(status: str = "", assignee: str = "") -> str:
+    def list_tasks(agent_name: str, token: str, status: str = "", assignee: str = "") -> str:
         """View tasks on the board. Filter by status and/or assignee."""
+        try:
+            db.require_token(agent_name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         tasks = db.list_tasks(status or None, assignee or None)
         return json.dumps(tasks)
 
     @mcp.tool()
-    def claim_task(task_id: int, agent_name: str) -> str:
+    def claim_task(task_id: int, agent_name: str, token: str) -> str:
         """Claim a pending task and start working on it."""
         try:
+            db.require_token(agent_name, token)
             result = db.claim_task(task_id, agent_name)
             if result is None:
                 return json.dumps(
@@ -75,9 +82,12 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             return json.dumps({"error": e.message})
 
     @mcp.tool()
-    def update_task(task_id: int, status: str, result: str = "", agent_name: str = "") -> str:
+    def update_task(
+        task_id: int, status: str, agent_name: str, token: str, result: str = ""
+    ) -> str:
         """Update a task's status and optionally set a result."""
         try:
+            db.require_token(agent_name, token)
             updated = db.update_task(
                 task_id, status, result or None, agent_name=agent_name or None
             )

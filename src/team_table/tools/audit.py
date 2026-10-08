@@ -13,6 +13,8 @@ from team_table.validation import ValidationError
 def register_tools(mcp: FastMCP, db: Database) -> None:
     @mcp.tool()
     def get_audit_log(
+        requester: str,
+        token: str,
         agent_name: str = "",
         action: str = "",
         since: str = "",
@@ -20,6 +22,7 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
     ) -> str:
         """Query audit entries with optional agent/action/since filters."""
         try:
+            db.require_token(requester, token)
             entries = db.get_audit_log(
                 agent_name=agent_name or None,
                 action=action or None,

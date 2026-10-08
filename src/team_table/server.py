@@ -53,6 +53,15 @@ async def stream_agent_events(request: Request):  # type: ignore[no-untyped-def]
             status_code=403,
         )
 
+    # Require token if configured
+    if config.require_tokens:
+        token = request.query_params.get("token", "")
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+        if not db.validate_token(agent_name, token):
+            return JSONResponse({"error": "Invalid or missing auth token"}, status_code=403)
+
     backend = get_backend()
     if not isinstance(backend, SSENotificationBackend):
         return JSONResponse(

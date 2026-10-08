@@ -6,6 +6,8 @@ import json
 import sqlite3
 import threading
 import time
+import secrets
+import hashlib
 from datetime import UTC, datetime
 
 from team_table.config import Config
@@ -82,6 +84,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
     target_type TEXT,
     target_id TEXT,
     details TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    revoked_at TEXT
 );
 """
 
@@ -163,6 +174,75 @@ class Database:
             (now, agent_name, action, target_type, target_id, details_json),
         )
         # Committed by the caller's transaction
+
+    # -- Auth tokens --
+
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def issue_token(self, agent_name: str) -> str:
+        """Create and persist a new auth token for an active agent."""
+        validate_agent_name(agent_name)
+        if self.get_member_role(agent_name) is None:
+            raise ValidationError(f"Agent '{agent_name}' is not registered or inactive")
+        token = secrets.token_urlsafe(32)
+        token_hash = self._hash_token(token)
+        now = datetime.now(UTC).isoformat()
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO auth_tokens (agent_name, token_hash, created_at)
+               VALUES (?, ?, ?)""",
+            (agent_name, token_hash, now),
+        )
+        self.log_action(agent_name, "issue_token", "token", None)
+        conn.commit()
+        return token
+
+    def revoke_tokens(self, agent_name: str) -> int:
+        """Revoke all active tokens for an agent. Returns count revoked."""
+        validate_agent_name(agent_name)
+        now = datetime.now(UTC).isoformat()
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "UPDATE auth_tokens SET revoked_at=? WHERE agent_name=? AND revoked_at IS NULL",
+            (now, agent_name),
+        )
+        if cursor.rowcount > 0:
+            self.log_action(agent_name, "revoke_tokens", "token", None)
+        conn.commit()
+        return cursor.rowcount
+
+    def validate_token(self, agent_name: str, token: str) -> bool:
+        """Return True if token is valid and active for the given agent."""
+        validate_agent_name(agent_name)
+        if not token:
+            return False
+        if self.get_member_role(agent_name) is None:
+            return False
+        token_hash = self._hash_token(token)
+        conn = self._get_conn()
+        row = conn.execute(
+            """SELECT id FROM auth_tokens
+               WHERE agent_name=? AND token_hash=? AND revoked_at IS NULL""",
+            (agent_name, token_hash),
+        ).fetchone()
+        if row is None:
+            return False
+        now = datetime.now(UTC).isoformat()
+        conn.execute(
+            "UPDATE auth_tokens SET last_used_at=? WHERE id=?",
+            (now, row["id"]),
+        )
+        conn.commit()
+        return True
+
+    def require_token(self, agent_name: str, token: str) -> None:
+        """Require a valid token if configured; raise ValidationError on failure."""
+        if not self.config.require_tokens:
+            return
+        if not self.validate_token(agent_name, token):
+            raise ValidationError("Invalid or missing auth token")
 
     def get_audit_log(
         self,
@@ -264,6 +344,7 @@ class Database:
         )
         if cursor.rowcount > 0:
             self.log_action(name, "deregister", "member", name)
+            self.revoke_tokens(name)
         conn.commit()
         return cursor.rowcount > 0
 

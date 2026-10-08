@@ -15,6 +15,12 @@ def _default_db_path() -> Path:
 _VALID_TRANSPORTS = {"stdio", "sse", "streamable-http"}
 
 
+def _parse_bool(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass
 class Config:
     """Server configuration."""
@@ -25,6 +31,7 @@ class Config:
     transport: str = "stdio"
     host: str = "127.0.0.1"
     port: int = 8741
+    require_tokens: bool = True
 
     @classmethod
     def from_env(cls) -> Config:
@@ -48,9 +55,13 @@ class Config:
             raise ValueError(
                 f"Invalid TEAM_TABLE_PORT={port}. Must be between 1 and 65535."
             )
+        require_tokens = _parse_bool(
+            os.environ.get("TEAM_TABLE_REQUIRE_TOKENS"), default=True
+        )
         return cls(
             db_path=Path(db_path) if db_path else _default_db_path(),
             transport=transport,
             host=host,
             port=port,
+            require_tokens=require_tokens,
         )

@@ -19,9 +19,10 @@ from team_table.validation import ValidationError
 
 def register_tools(mcp: FastMCP, db: Database) -> None:
     @mcp.tool()
-    def send_message(sender: str, recipient: str, content: str) -> str:
+    def send_message(sender: str, token: str, recipient: str, content: str) -> str:
         """Send a direct message to another agent."""
         try:
+            db.require_token(sender, token)
             result = db.send_message(sender, recipient, content)
             notify(
                 recipient,
@@ -37,16 +38,21 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
 
     @mcp.tool()
     def get_messages(
-        agent_name: str, include_read: bool = False, include_archived: bool = False
+        agent_name: str, token: str, include_read: bool = False, include_archived: bool = False
     ) -> str:
         """Check inbox. Marks direct messages as read."""
+        try:
+            db.require_token(agent_name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         messages = db.get_messages(agent_name, include_read, include_archived)
         return json.dumps(messages)
 
     @mcp.tool()
-    def broadcast(sender: str, content: str) -> str:
+    def broadcast(sender: str, token: str, content: str) -> str:
         """Send a message to all agents."""
         try:
+            db.require_token(sender, token)
             result = db.broadcast(sender, content)
             notify_all(
                 make_event(EVENT_BROADCAST, {
@@ -60,34 +66,46 @@ def register_tools(mcp: FastMCP, db: Database) -> None:
             return json.dumps({"error": e.message})
 
     @mcp.tool()
-    def delete_message(message_id: int, agent_name: str) -> str:
+    def delete_message(message_id: int, agent_name: str, token: str) -> str:
         """Soft-delete a message. Owner or admin/lead can delete."""
+        try:
+            db.require_token(agent_name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         result = db.delete_message(message_id, agent_name)
         if result is None:
             return json.dumps({"error": f"Message {message_id} not found"})
         return json.dumps(result)
 
     @mcp.tool()
-    def archive_message(message_id: int, agent_name: str) -> str:
+    def archive_message(message_id: int, agent_name: str, token: str) -> str:
         """Archive a message: soft-delete and mark as read."""
+        try:
+            db.require_token(agent_name, token)
+        except ValidationError as e:
+            return json.dumps({"error": e.message})
         result = db.archive_message(message_id, agent_name)
         if result is None:
             return json.dumps({"error": f"Message {message_id} not found"})
         return json.dumps(result)
 
     @mcp.tool()
-    def clear_inbox(agent_name: str, before_date: str = "", sender: str = "") -> str:
+    def clear_inbox(
+        agent_name: str, token: str, before_date: str = "", sender: str = ""
+    ) -> str:
         """Bulk archive messages. Filters: before_date (ISO), sender."""
         try:
+            db.require_token(agent_name, token)
             result = db.clear_inbox(agent_name, before_date or None, sender or None)
             return json.dumps(result)
         except ValidationError as e:
             return json.dumps({"error": e.message})
 
     @mcp.tool()
-    def purge_messages(agent_name: str, before_date: str) -> str:
+    def purge_messages(agent_name: str, token: str, before_date: str) -> str:
         """Hard-delete messages older than before_date. Requires admin or lead role."""
         try:
+            db.require_token(agent_name, token)
             result = db.purge_messages(agent_name, before_date)
             return json.dumps(result)
         except ValidationError as e:
