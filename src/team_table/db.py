@@ -103,6 +103,24 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
     last_used_at TEXT,
     revoked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS floors (
+    channel TEXT PRIMARY KEY,
+    seats TEXT NOT NULL DEFAULT '[]',
+    operators TEXT NOT NULL DEFAULT '[]',
+    holder TEXT,
+    since REAL,
+    queue TEXT NOT NULL DEFAULT '[]',
+    hold_seconds INTEGER NOT NULL DEFAULT 180
+);
+
+CREATE TABLE IF NOT EXISTS talk (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 # -- Rate limiting --
@@ -130,6 +148,11 @@ TASK_COLUMNS = (
     ("budget_tasks", "INTEGER"), ("budget_depth", "INTEGER"),
 )
 _PRIORITY_ORDER = "CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END"
+
+# -- The floor: one speaker at a time at a table's conversation --
+FLOOR_HOLD_SECONDS = 180    # a seat that holds the floor this long without speaking loses it
+MAX_TALK_CHARS = 4000       # one thing said at the table
+TALK_LIMIT_MAX = 200
 AUDIT_LIMIT_MAX = 200
 
 
@@ -1116,3 +1139,168 @@ class Database:
             }
             for r in rows
         ]
+
+    # -- The floor: a table's conversation, one speaker at a time --
+    # The seats of a table talk in its channel. Whoever holds the floor speaks; the floor passes by name or
+    # in seat order; a seat asks for it and waits its turn in the queue. The operators (the person, the
+    # lead seat) speak whenever they need to and can take the floor. A holder silent past hold_seconds loses
+    # it, so a stuck seat never holds the table.
+
+    def open_floor(self, channel: str, seats: list[str], operators: list[str], by: str,
+                   hold_seconds: int = FLOOR_HOLD_SECONDS) -> dict:
+        """Set up (or reset) a table's floor: its seats in order and its operators. Only the operator's
+        roles (person, admin, lead) may."""
+        validate_agent_name(by)
+        if self.get_member_role(by) not in OPERATOR_ROLES:
+            raise ValidationError("Only the person (or admin/lead) can set up a table's floor")
+        if not channel or len(channel) > 64:
+            raise ValidationError("A channel is 1-64 characters")
+        for name in list(seats) + list(operators):
+            validate_agent_name(name)
+        if not 10 <= int(hold_seconds) <= 3600:
+            raise ValidationError("hold_seconds is 10-3600")
+        conn = self._get_conn()
+        conn.execute(
+            """INSERT INTO floors (channel, seats, operators, holder, since, queue, hold_seconds)
+               VALUES (?, ?, ?, NULL, NULL, '[]', ?)
+               ON CONFLICT(channel) DO UPDATE SET seats=excluded.seats, operators=excluded.operators,
+                   holder=NULL, since=NULL, queue='[]', hold_seconds=excluded.hold_seconds""",
+            (channel, json.dumps(list(seats)), json.dumps(list(operators)), int(hold_seconds)),
+        )
+        self.log_action(by, "open_floor", "floor", channel, {"seats": list(seats)})
+        conn.commit()
+        return self.floor(channel)
+
+    def _floor_row(self, conn, channel: str):
+        row = conn.execute("SELECT * FROM floors WHERE channel=?", (channel,)).fetchone()
+        if row is None:
+            raise ValidationError(f"No table floor '{channel}'")
+        return row
+
+    def _floor_now(self, conn, row) -> dict:
+        """The floor as it stands, with a silent holder's time run out: it passes to the queue's first."""
+        state = {"channel": row["channel"], "seats": json.loads(row["seats"]),
+                 "operators": json.loads(row["operators"]), "holder": row["holder"],
+                 "since": row["since"], "queue": json.loads(row["queue"]),
+                 "hold_seconds": row["hold_seconds"]}
+        if state["holder"] and state["since"] is not None and \
+                time.time() - state["since"] > state["hold_seconds"]:
+            nxt = state["queue"].pop(0) if state["queue"] else None
+            self.log_action("table", "floor_expired", "floor", state["channel"],
+                            {"from": state["holder"], "to": nxt})
+            state["holder"], state["since"] = nxt, (time.time() if nxt else None)
+            self._floor_save(conn, state)
+        state["expires_in"] = max(0, int(state["hold_seconds"] - (time.time() - state["since"]))) \
+            if state["holder"] and state["since"] is not None else None
+        return state
+
+    @staticmethod
+    def _floor_save(conn, state: dict) -> None:
+        conn.execute("UPDATE floors SET holder=?, since=?, queue=? WHERE channel=?",
+                     (state["holder"], state["since"], json.dumps(state["queue"]), state["channel"]))
+        conn.commit()
+
+    def floor(self, channel: str) -> dict:
+        """Who has the floor, who waits for it, and how long the holder has left."""
+        conn = self._get_conn()
+        return self._floor_now(conn, self._floor_row(conn, channel))
+
+    def _at_table(self, state: dict, name: str) -> None:
+        if name not in state["seats"] and name not in state["operators"]:
+            raise ValidationError(f"'{name}' has no seat at this table")
+
+    def say(self, channel: str, sender: str, content: str) -> dict:
+        """Say something at the table: the holder, or anyone when the floor is free (they take it), or an
+        operator at any time. Saying keeps the floor."""
+        validate_agent_name(sender)
+        if not content.strip():
+            raise ValidationError("Say something")
+        if len(content) > MAX_TALK_CHARS:
+            raise ValidationError(f"Too long for the table ({len(content)} characters, max "
+                                  f"{MAX_TALK_CHARS}): put it in shared context and say where")
+        self._check_rate_limit(sender)
+        conn = self._get_conn()
+        state = self._floor_now(conn, self._floor_row(conn, channel))
+        self._at_table(state, sender)
+        operator = sender in state["operators"]
+        if state["holder"] and state["holder"] != sender and not operator:
+            raise ValidationError(f"'{state['holder']}' has the floor: request_floor to speak next")
+        if not state["holder"] or state["holder"] == sender:
+            state["holder"], state["since"] = sender, time.time()
+            if sender in state["queue"]:
+                state["queue"].remove(sender)
+            self._floor_save(conn, state)
+        now = datetime.now(UTC).isoformat()
+        cur = conn.execute("INSERT INTO talk (channel, sender, content, created_at) VALUES (?, ?, ?, ?)",
+                           (channel, sender, content, now))
+        self.log_action(sender, "say", "floor", channel, {"id": cur.lastrowid})
+        conn.commit()
+        return {"id": cur.lastrowid, "channel": channel, "sender": sender, "created_at": now,
+                "holder": state["holder"]}
+
+    def pass_floor(self, channel: str, sender: str, to: str | None = None) -> dict:
+        """The holder (or an operator) gives the floor: to a named seat, else to the queue's first, else to
+        the next seat in order; "" leaves it free."""
+        validate_agent_name(sender)
+        conn = self._get_conn()
+        state = self._floor_now(conn, self._floor_row(conn, channel))
+        if state["holder"] != sender and sender not in state["operators"]:
+            raise ValidationError(f"Only the holder ('{state['holder']}') passes the floor")
+        if to == "":
+            nxt = None
+        elif to:
+            self._at_table(state, to)
+            nxt = to
+        elif state["queue"]:
+            nxt = state["queue"][0]
+        else:
+            seats = state["seats"]
+            at = seats.index(sender) if sender in seats else -1
+            nxt = seats[(at + 1) % len(seats)] if seats else None
+        if nxt in state["queue"]:
+            state["queue"].remove(nxt)
+        state["holder"], state["since"] = nxt, (time.time() if nxt else None)
+        self._floor_save(conn, state)
+        self.log_action(sender, "pass_floor", "floor", channel, {"to": nxt})
+        conn.commit()
+        return self._floor_now(conn, self._floor_row(conn, channel))
+
+    def request_floor(self, channel: str, sender: str) -> dict:
+        """Ask to speak: a free floor is yours now; else you wait in the queue."""
+        validate_agent_name(sender)
+        conn = self._get_conn()
+        state = self._floor_now(conn, self._floor_row(conn, channel))
+        self._at_table(state, sender)
+        if not state["holder"]:
+            state["holder"], state["since"] = sender, time.time()
+        elif state["holder"] != sender and sender not in state["queue"]:
+            state["queue"].append(sender)
+        self._floor_save(conn, state)
+        self.log_action(sender, "request_floor", "floor", channel)
+        conn.commit()
+        return self._floor_now(conn, self._floor_row(conn, channel))
+
+    def take_floor(self, channel: str, sender: str) -> dict:
+        """An operator (the person, the lead seat) takes the floor now."""
+        validate_agent_name(sender)
+        conn = self._get_conn()
+        state = self._floor_now(conn, self._floor_row(conn, channel))
+        if sender not in state["operators"]:
+            raise ValidationError("Only the person or the lead seat can take the floor")
+        if state["holder"] and state["holder"] != sender and state["holder"] not in state["queue"]:
+            state["queue"].insert(0, state["holder"])  # the one interrupted speaks next
+        state["holder"], state["since"] = sender, time.time()
+        self._floor_save(conn, state)
+        self.log_action(sender, "take_floor", "floor", channel)
+        conn.commit()
+        return self._floor_now(conn, self._floor_row(conn, channel))
+
+    def conversation(self, channel: str, after_id: int = 0, limit: int = 50) -> list[dict]:
+        """What was said at the table after `after_id`, oldest first."""
+        limit = max(1, min(int(limit), TALK_LIMIT_MAX))
+        conn = self._get_conn()
+        self._floor_row(conn, channel)
+        rows = conn.execute("SELECT * FROM talk WHERE channel=? AND id>? ORDER BY id LIMIT ?",
+                            (channel, int(after_id), limit)).fetchall()
+        return [{"id": r["id"], "sender": r["sender"], "content": r["content"],
+                 "created_at": r["created_at"]} for r in rows]

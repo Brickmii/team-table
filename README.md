@@ -128,6 +128,24 @@ python -m team_table.admin revoke-tokens some-agent
 
 Names listed in `TEAM_TABLE_ADMINS` may register directly with a privileged role.
 
+### The floor: a table's conversation, one speaker at a time
+
+Beside the tasks, the seats of a table can talk — and take turns, so they don't talk over each other.
+The person (or admin/lead) opens a floor for a channel with its seats in order and its operators;
+then:
+
+- `say` — the holder speaks; a free floor goes to whoever speaks first. Operators (the person, the
+  lead seat) speak whenever they need to.
+- `pass_floor` — to a named seat, else to whoever is waiting, else to the next seat round the table;
+  `""` leaves it free.
+- `request_floor` — a free floor is yours now; otherwise you wait in the queue.
+- `take_floor` — an operator takes the floor; the one interrupted speaks next.
+- `floor`, `conversation` — who has it and who waits; what was said after a given id.
+
+A holder that stays silent past `hold_seconds` (default 180) loses the floor to the queue's first, so
+a stuck agent never holds the table. Each thing said is at most 4,000 characters: bulk goes in shared
+context.
+
 ### Network security
 
 Network mode speaks plain HTTP: tokens and messages cross the network unencrypted. Use it on a

@@ -112,3 +112,4 @@
 | Audit log pulled forward in roadmap | Async workers running unattended require full traceability for operators |
 | Agent handoff protocol added | Async worker → reviewer workflow is core to the Codex integration use case |
 | Turn tokens (2026-10-08) | Cin-MinAI uses the table as its turn-token engine: task trees with budgets, a size cap of 5 % of the receiver's context, the person's requests first, Stop for a whole tree, reviewer hand-offs |
+| The floor (2026-10-21) | A table's conversation with one speaker at a time: say, pass_floor (by name, the queue, or seat order), request_floor, take_floor for the person and the lead seat, a silent holder losing the floor — for Cin-MinAI's conference table of local, cloud and outside agents |

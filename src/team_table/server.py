@@ -18,7 +18,7 @@ from team_table.notifications import (
     get_backend,
     make_event,
 )
-from team_table.tools import audit, context, messaging, registration, tasks
+from team_table.tools import audit, context, floor, messaging, registration, tasks
 
 config = Config.from_env()
 mcp = FastMCP("team-table", host=config.host, port=config.port)
@@ -29,6 +29,7 @@ messaging.register_tools(mcp, db)
 tasks.register_tools(mcp, db)
 context.register_tools(mcp, db)
 audit.register_tools(mcp, db)
+floor.register_tools(mcp, db)
 
 
 # -- SSE push notification endpoint --
